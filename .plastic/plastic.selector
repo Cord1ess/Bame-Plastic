@@ -1,0 +1,4 @@
+repository "Bame Plastic/Bame Plastic@18966793337185@cloud"
+  path "/"
+    br "/main"
+    co "/main"

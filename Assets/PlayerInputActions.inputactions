@@ -1,0 +1,86 @@
+{
+    "version": 1,
+    "name": "PlayerInputActions",
+    "maps": [
+        {
+            "name": "Gameplay",
+            "id": "744004af-0af8-4489-bdb2-cfc534e68169",
+            "actions": [
+                {
+                    "name": "Steer(int, float)",
+                    "type": "Value",
+                    "id": "538b1ae2-1bcb-42a9-8b3a-984ee970dc01",
+                    "expectedControlType": "Axis",
+                    "processors": "",
+                    "interactions": "",
+                    "initialStateCheck": true
+                },
+                {
+                    "name": "•\tAccelerate",
+                    "type": "Button",
+                    "id": "877aeaf3-eea1-4bee-bbc4-83a6326fda8e",
+                    "expectedControlType": "",
+                    "processors": "",
+                    "interactions": "",
+                    "initialStateCheck": false
+                },
+                {
+                    "name": "•\tDrift",
+                    "type": "Button",
+                    "id": "95a81654-6d77-4559-ba3b-b8c66fa63f4b",
+                    "expectedControlType": "",
+                    "processors": "",
+                    "interactions": "",
+                    "initialStateCheck": false
+                }
+            ],
+            "bindings": [
+                {
+                    "name": "",
+                    "id": "88c2a393-579e-4854-aba4-e4b91d52bee5",
+                    "path": "<Keyboard>/#(A)",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Steer(int, float)",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "e89426a1-dc7d-4153-aed7-287de27a1111",
+                    "path": "<Keyboard>/#(D)",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Steer(int, float)",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "11653c96-a921-4e61-9df9-2d08772cf4fa",
+                    "path": "<Keyboard>/shift",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "•\tAccelerate",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "531641a9-a4bc-4a7a-8d92-33bbfa69e425",
+                    "path": "<Keyboard>/space",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "•\tDrift",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                }
+            ]
+        }
+    ],
+    "controlSchemes": []
+}
