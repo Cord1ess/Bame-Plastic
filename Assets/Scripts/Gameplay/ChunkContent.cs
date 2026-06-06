@@ -1,68 +1,180 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-/// Hosts a road-chunk's world content so it RIDES THE TREADMILL POOL. Content is built once as
-/// CHILDREN of the chunk (at load), then only repositioned/reset when the chunk is reused — never
-/// Instantiated mid-game. Because it's parented under the chunk root it also travels correctly when
-/// the chunk is recycled and (later) when FloatingOrigin shifts the world.
-///
-/// LevelLayoutGenerator calls OnActivated() each time the chunk goes live (first spawn or reuse) —
-/// the same "I'm live now, reset yourself" signal as TriggerExit.ReArm(). It's auto-added to pooled
-/// chunks (toggle on the generator); add it to a chunk prefab yourself to tune per-chunk.
-///
-/// For now it spawns a placeholder roadside CROWD; the same pattern will host bus stops + waiting
-/// passengers next.
+/// Hosts a chunk's BUS STOP so it rides the treadmill pool. The generator marks every ~3-4 chunks as a
+/// stop. A stop places an indicator on the LEFT of the road and borrows waiting passengers from the
+/// global PassengerPool, arranged in clumps + scattered randoms. Two-phase pickup:
+///   1) bus within gatherRange  -> ~half the crowd walks to the curb ("crowds up" early),
+///   2) bus within boardRange + slow -> the curb crowd walks to the door and boards 1-by-1.
+/// Un-boarded passengers are returned to the pool when the stop resets; nothing is Instantiated here.
 public class ChunkContent : MonoBehaviour
 {
-    [Header("Roadside crowd (placeholder)")]
-    [Tooltip("People per chunk. 0 = none.")]
-    public int crowdCount = 6;
-    public float characterHeight = 1.8f;
-    [Tooltip("Scatter radius around the road anchor.")]
-    public float crowdRadius = 8f;
-    [Tooltip("Offset to the side of the road anchor (approximate — precise roadside comes with authored stop points later).")]
-    public float sideOffset = 7f;
+    [Header("Stop placement")]
+    [Tooltip("How far LEFT of the road the stop + waiting crowd sit (we drive on the left).")]
+    public float stopSideOffset = 6f;
+    [Tooltip("Distance LEFT of road centre that the crowd gathers at the curb (closer than the stop).")]
+    public float curbOffset = 2.5f;
+
+    [Header("Waiting crowd (clumps + randoms)")]
+    public int maxWaiting = 30;
+    public int clumps = 3;
+    public int clumpSize = 7;
+    public float clumpDistanceMin = 5f;
+    public float clumpDistanceMax = 16f;
+    public float clumpRadius = 3f;
+    public int randoms = 9;
+    public float randomSpread = 18f;
+
+    [Header("Fares")]
+    public int baseFare = 20;
+    public int fareVariance = 15;
+
+    [Header("Crowd-up & boarding")]
+    [Tooltip("Bus this close -> selected passengers move to the curb and wait.")]
+    public float gatherRange = 45f;
+    [Tooltip("Bus this close AND slow -> the gathered crowd walks to the door and boards.")]
+    public float boardRange = 22f;
+    [Range(0f, 1f)] public float boardFraction = 0.5f;
 
     static readonly Color[] Palette =
     {
-        new Color(0.85f,0.25f,0.25f), new Color(0.25f,0.5f,0.85f), new Color(0.95f,0.8f,0.25f),
-        new Color(0.3f,0.75f,0.4f),   new Color(0.7f,0.4f,0.8f),   new Color(0.95f,0.55f,0.2f),
-        new Color(0.9f,0.9f,0.9f),    new Color(0.4f,0.7f,0.75f),
+        new Color(0.85f,0.3f,0.3f),  new Color(0.3f,0.5f,0.85f),  new Color(0.9f,0.75f,0.3f),
+        new Color(0.35f,0.7f,0.45f), new Color(0.7f,0.45f,0.8f),  new Color(0.9f,0.6f,0.3f),
+        new Color(0.85f,0.85f,0.85f),new Color(0.45f,0.7f,0.72f),
     };
 
-    readonly List<BillboardCharacter> _crowd = new List<BillboardCharacter>();
-    bool _built;
+    GameObject _box;
+    readonly List<Passenger> _borrowed = new List<Passenger>();
+    bool _isStop, _gathered, _boardingDone;
+    Vector3 _stopPos, _curbBase;
 
-    void Start() { EnsureBuilt(); }
-
-    // Called by LevelLayoutGenerator when this chunk is placed into play (first spawn or reuse).
-    public void OnActivated()
+    // Called by LevelLayoutGenerator when the chunk goes live.
+    public void OnActivated(bool isStop)
     {
-        EnsureBuilt();
-        // Reuse just resets cheap state (no Instantiate) — re-randomise colours so reused chunks differ.
-        for (int i = 0; i < _crowd.Count; i++)
-            if (_crowd[i] != null) _crowd[i].SetColor(RandomColor());
+        ReturnAllWaiting();                       // give back un-boarded passengers from a previous life
+        _isStop = isStop;
+        _gathered = false;
+        _boardingDone = false;
+        if (isStop) ActivateStop();
+        else if (_box != null) _box.SetActive(false);
     }
 
-    void EnsureBuilt()
+    void EnsureBox()
     {
-        if (_built) return;
-        _built = true;
-        if (crowdCount <= 0) return;
-
-        // Anchor near the chunk's exit trigger — a known on-road point in every chunk.
-        Vector3 anchorWorld = FindAnchor().position;
-
-        for (int i = 0; i < crowdCount; i++)
+        if (_box != null) return;
+        _box = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        _box.name = "BusStopBox";
+        Collider col = _box.GetComponent<Collider>();
+        if (col != null) Destroy(col);
+        _box.transform.SetParent(transform, false);
+        Renderer br = _box.GetComponent<Renderer>();
+        if (br != null)
         {
-            BillboardCharacter bc = BillboardCharacter.Create("Crowd_" + i, RandomColor(), characterHeight, Vector3.zero, transform);
-            float ang = i * 137.5f * Mathf.Deg2Rad;                         // golden-angle scatter
-            float rad = crowdRadius * (0.35f + 0.65f * Mathf.Repeat(i * 0.37f, 1f));
-            // Offsets are in METRES (world space), so spacing is independent of the chunk's scale.
-            Vector3 worldOffset = new Vector3(Mathf.Cos(ang) * rad + sideOffset, 0f, Mathf.Sin(ang) * rad);
-            bc.transform.position = anchorWorld + worldOffset;              // child of chunk -> rides it forever
-            _crowd.Add(bc);
+            Shader sh = Shader.Find("Universal Render Pipeline/Lit");
+            if (sh != null)
+            {
+                Material m = new Material(sh);
+                m.SetColor("_BaseColor", new Color(0.95f, 0.5f, 0.1f));
+                br.material = m;
+            }
         }
+    }
+
+    void ActivateStop()
+    {
+        EnsureBox();
+        Vector3 anchor = FindAnchor().position;
+        float groundY = GroundTopY(anchor.y);
+
+        // Chunks spawn unrotated and the straight road runs +Z, so "left" is -X.
+        _stopPos = new Vector3(anchor.x - stopSideOffset, groundY, anchor.z);
+        _curbBase = new Vector3(anchor.x - curbOffset, groundY, anchor.z);
+
+        _box.SetActive(true);
+        _box.transform.position = _stopPos + Vector3.up * 0.75f;
+        SetWorldScale(_box.transform, new Vector3(1.2f, 1.5f, 1.2f));
+
+        SpawnWaiting(groundY);
+    }
+
+    void SpawnWaiting(float groundY)
+    {
+        if (PassengerPool.Instance == null) return;
+        int placed = 0;
+        for (int c = 0; c < clumps && placed < maxWaiting; c++)
+        {
+            float cd = Random.Range(clumpDistanceMin, clumpDistanceMax);
+            float ca = Random.Range(0f, Mathf.PI * 2f);
+            Vector3 center = _stopPos + new Vector3(Mathf.Cos(ca) * cd, 0f, Mathf.Sin(ca) * cd);
+            for (int k = 0; k < clumpSize && placed < maxWaiting; k++)
+            {
+                Vector2 o = Random.insideUnitCircle * clumpRadius;
+                if (TakePlace(new Vector3(center.x + o.x, groundY, center.z + o.y), placed)) placed++;
+            }
+        }
+        for (int n = 0; n < randoms && placed < maxWaiting; n++)
+        {
+            Vector2 o = Random.insideUnitCircle * randomSpread;
+            if (TakePlace(new Vector3(_stopPos.x + o.x, groundY, _stopPos.z + o.y), placed)) placed++;
+        }
+    }
+
+    bool TakePlace(Vector3 worldPos, int colorIdx)
+    {
+        Passenger p = PassengerPool.Instance.Take();
+        if (p == null) return false;                  // pool exhausted — fine, just fewer people
+        p.transform.SetParent(transform, true);       // ride this chunk while waiting
+        p.transform.position = worldPos;
+        p.ResetWaiting(Random.Range(baseFare, baseFare + fareVariance + 1), Palette[colorIdx % Palette.Length]);
+        _borrowed.Add(p);
+        return true;
+    }
+
+    void ReturnAllWaiting()
+    {
+        for (int i = 0; i < _borrowed.Count; i++)
+        {
+            Passenger p = _borrowed[i];
+            if (p == null) continue;
+            // Only reclaim ones that never boarded; aboard passengers are owned by the bus now.
+            if ((p.state == Passenger.State.Waiting || p.state == Passenger.State.Gathering) && PassengerPool.Instance != null)
+                PassengerPool.Instance.Return(p);
+        }
+        _borrowed.Clear();
+    }
+
+    void Update()
+    {
+        if (!_isStop || _borrowed.Count == 0) return;
+        BusPassengers bus = BusPassengers.Instance;
+        if (bus == null) return;
+
+        float dSqr = (bus.transform.position - _stopPos).sqrMagnitude;
+
+        // Phase 1 — crowd up at the curb as the bus approaches.
+        if (!_gathered && dSqr <= gatherRange * gatherRange)
+        {
+            _gathered = true;
+            int g = 0;
+            for (int i = 0; i < _borrowed.Count; i++)
+                if (_borrowed[i].state == Passenger.State.Waiting && Random.value < boardFraction)
+                    _borrowed[i].BeginGather(CurbPoint(g++));
+        }
+
+        // Phase 2 — bus pulled up slow & close: the curb crowd boards.
+        if (_gathered && !_boardingDone && bus.CanBoard && dSqr <= boardRange * boardRange)
+        {
+            _boardingDone = true;
+            for (int i = 0; i < _borrowed.Count; i++)
+                if (_borrowed[i].state == Passenger.State.Gathering)
+                    _borrowed[i].BeginBoarding(bus);
+        }
+    }
+
+    // A spot along the curb (a loose line in front of the stop, with a little depth jitter).
+    Vector3 CurbPoint(int g)
+    {
+        return _curbBase + new Vector3(Random.Range(-0.8f, 0.8f), 0f, (g - 3f) * 1.3f);
     }
 
     Transform FindAnchor()
@@ -71,5 +183,27 @@ public class ChunkContent : MonoBehaviour
         return te != null ? te.transform : transform;
     }
 
-    static Color RandomColor() => Palette[Random.Range(0, Palette.Length)];
+    // Top Y of the chunk's biggest flat mesh (the road/ground) so passengers stand on the ground.
+    float GroundTopY(float fallback)
+    {
+        Renderer best = null;
+        float bestArea = 0f;
+        foreach (Renderer r in GetComponentsInChildren<Renderer>())
+        {
+            if (!(r is MeshRenderer)) continue;
+            if (_box != null && r.gameObject == _box) continue;
+            Vector3 sz = r.bounds.size;
+            float area = sz.x * sz.z;
+            if (area > bestArea) { bestArea = area; best = r; }
+        }
+        return best != null ? best.bounds.max.y : fallback;
+    }
+
+    void SetWorldScale(Transform t, Vector3 worldScale)
+    {
+        Vector3 p = transform.lossyScale;
+        t.localScale = new Vector3(worldScale.x / NonZero(p.x), worldScale.y / NonZero(p.y), worldScale.z / NonZero(p.z));
+    }
+
+    static float NonZero(float v) => Mathf.Abs(v) < 1e-6f ? 1f : v;
 }

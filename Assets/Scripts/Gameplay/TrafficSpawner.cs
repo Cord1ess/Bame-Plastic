@@ -1,74 +1,109 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-/// Spawns placeholder traffic/obstacles ahead of the bus and recycles them once passed.
-/// Lightweight stand-in traffic for the free-roam track. Tune spawnAhead / lateralSpread to your road width.
+/// Bus-relative traffic to dodge. Builds a small POOL of placeholder vehicles (code-generated coloured
+/// boxes with trigger colliders + Obstacle) at load — no prefabs — and keeps them ahead of the bus,
+/// recycling each one ahead again once the bus has driven past it (no mid-game Instantiate). Hitting
+/// one sheds speed + damages bus health. Auto-finds the bus; LevelLayoutGenerator auto-creates one.
+///
+/// NOTE: these ride neither a chunk nor the bus (they're a self-managed pool), which is fine while
+/// FloatingOrigin is off. When it's re-enabled, this pool must shift with the world (subscribe to the
+/// origin delta) — flagged in PROJECT_UNDERSTANDING.
 public class TrafficSpawner : MonoBehaviour
 {
-    [Header("References")]
-    public Transform bus;                       // the player bus root
-    public GameObject[] obstaclePrefabs;        // e.g. parked car / CNG / rickshaw placeholders
+    [Header("Density / placement")]
+    public int count = 8;
+    public float spawnAheadMin = 30f;
+    public float spawnAheadMax = 90f;
+    [Tooltip("Sideways spread from the bus's heading line (tune to road width).")]
+    public float lateralSpread = 5f;
+    [Tooltip("Recycle a vehicle ahead once it's this far behind the bus.")]
+    public float despawnBehind = 25f;
 
-    [Header("Spawning")]
-    [Tooltip("Distance ahead of the bus to spawn. Keep modest so turns don't push spawns off the road.")]
-    public float spawnAhead = 45f;
-    [Tooltip("Random sideways offset from the bus's heading line (tune to road width).")]
-    public float lateralSpread = 4f;
-    [Tooltip("Seconds between spawn attempts.")]
-    public float spawnInterval = 1.2f;
-    [Tooltip("Maximum obstacles alive at once.")]
-    public int maxActive = 12;
+    [Header("Vehicle")]
+    public Vector3 vehicleSize = new Vector3(2.2f, 1.6f, 4.5f);
+    [Range(0f, 1f)] public float speedAfterHit = 0.5f;
+    public int damageOnHit = 12;
 
-    [Header("Ground Seating")]
-    [Tooltip("Layers counted as drivable ground; spawned obstacles are dropped onto it (set to your 'Ground' layer).")]
+    [Tooltip("Optional: road/ground layer so vehicles sit on it. If 0, they sit at the bus's height.")]
     public LayerMask groundMask;
 
-    [Header("Recycle")]
-    [Tooltip("Destroy an obstacle once it's this far behind the bus.")]
-    public float despawnBehind = 30f;
-
-    readonly List<GameObject> _active = new List<GameObject>();
-    float _timer;
-
-    void Update()
+    static readonly Color[] Palette =
     {
-        if (bus == null || obstaclePrefabs == null || obstaclePrefabs.Length == 0) return;
+        new Color(0.8f,0.2f,0.2f), new Color(0.2f,0.35f,0.7f), new Color(0.85f,0.85f,0.2f),
+        new Color(0.85f,0.85f,0.85f), new Color(0.2f,0.5f,0.3f), new Color(0.5f,0.5f,0.55f),
+    };
 
-        // Recycle obstacles the bus has driven past (or that were destroyed on hit).
-        for (int i = _active.Count - 1; i >= 0; i--)
-        {
-            if (_active[i] == null) { _active.RemoveAt(i); continue; }
-            Vector3 toObj = _active[i].transform.position - bus.position;
-            if (Vector3.Dot(bus.forward, toObj) < -despawnBehind)
-            {
-                Destroy(_active[i]);
-                _active.RemoveAt(i);
-            }
-        }
+    Transform _bus;
+    readonly List<Transform> _pool = new List<Transform>();
 
-        _timer -= Time.deltaTime;
-        if (_timer <= 0f && _active.Count < maxActive)
+    void Start()
+    {
+        _bus = FindBus();
+        for (int i = 0; i < count; i++)
         {
-            _timer = spawnInterval;
-            SpawnOne();
+            Transform v = BuildVehicle(i);
+            _pool.Add(v);
+            if (_bus != null) Reposition(v);
         }
     }
 
-    void SpawnOne()
+    Transform FindBus()
     {
-        Vector3 right = Vector3.Cross(Vector3.up, bus.forward).normalized;
-        Vector3 pos = bus.position
-                    + bus.forward * spawnAhead
-                    + right * Random.Range(-lateralSpread, lateralSpread);
+        BusController bc = FindFirstObjectByType<BusController>();
+        return bc != null ? bc.transform : null;
+    }
 
-        // Drop onto the road surface if we can find it under the spawn point.
-        if (groundMask.value != 0 &&
-            Physics.Raycast(pos + Vector3.up * 10f, Vector3.down, out RaycastHit hit, 50f, groundMask))
+    Transform BuildVehicle(int i)
+    {
+        GameObject go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        go.name = "Traffic_" + i;
+        go.transform.SetParent(transform, false);
+        go.transform.localScale = vehicleSize;
+
+        Renderer r = go.GetComponent<Renderer>();
+        if (r != null)
         {
-            pos.y = hit.point.y;
+            Shader sh = Shader.Find("Universal Render Pipeline/Lit");
+            if (sh != null) { Material m = new Material(sh); m.SetColor("_BaseColor", Palette[i % Palette.Length]); r.material = m; }
         }
 
-        GameObject prefab = obstaclePrefabs[Random.Range(0, obstaclePrefabs.Length)];
-        _active.Add(Instantiate(prefab, pos, Quaternion.LookRotation(bus.forward, Vector3.up)));
+        BoxCollider col = go.GetComponent<BoxCollider>();
+        if (col != null) col.isTrigger = true;
+
+        Obstacle ob = go.AddComponent<Obstacle>();
+        ob.speedAfterHit = speedAfterHit;
+        ob.damageOnHit = damageOnHit;
+        return go.transform;
+    }
+
+    void Update()
+    {
+        if (_bus == null) { _bus = FindBus(); return; }
+
+        for (int i = 0; i < _pool.Count; i++)
+        {
+            Transform v = _pool[i];
+            if (v == null) continue;
+            if (Vector3.Dot(_bus.forward, v.position - _bus.position) < -despawnBehind)
+                Reposition(v);
+        }
+    }
+
+    void Reposition(Transform v)
+    {
+        Vector3 fwd = _bus.forward;
+        Vector3 right = Vector3.Cross(Vector3.up, fwd).normalized;
+        Vector3 pos = _bus.position
+                    + fwd * Random.Range(spawnAheadMin, spawnAheadMax)
+                    + right * Random.Range(-lateralSpread, lateralSpread);
+
+        if (groundMask.value != 0 && Physics.Raycast(pos + Vector3.up * 10f, Vector3.down, out RaycastHit hit, 60f, groundMask))
+            pos.y = hit.point.y + vehicleSize.y * 0.5f;
+        else
+            pos.y = _bus.position.y;   // roughly the bus's level so the trigger overlaps its path
+
+        v.SetPositionAndRotation(pos, Quaternion.LookRotation(fwd, Vector3.up));
+        if (!v.gameObject.activeSelf) v.gameObject.SetActive(true);   // re-show any hideOnHit ones
     }
 }

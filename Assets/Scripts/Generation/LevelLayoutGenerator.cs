@@ -17,8 +17,15 @@ public class LevelLayoutGenerator : MonoBehaviour
     [Tooltip("Spare instances built per chunk variant at load. Higher = more memory but guarantees nothing is built mid-game. Raise it if you still see an occasional early-game hitch.")]
     public int prewarmPerVariant = 4;
 
-    [Tooltip("Auto-add ChunkContent (roadside crowd placeholder) to pooled chunks, so world content rides the treadmill with zero setup. Turn off to place ChunkContent yourself or to disable crowd.")]
+    [Tooltip("Auto-add ChunkContent (bus-stop host) to pooled chunks so stops ride the treadmill with zero setup. Turn off to place ChunkContent yourself.")]
     public bool autoPopulateChunks = true;
+
+    [Header("Bus stops")]
+    [Tooltip("A bus stop appears every N chunks, randomised between min and max.")]
+    public int minStopGap = 2;
+    public int maxStopGap = 3;
+    private int _chunksSinceStop = 0;
+    private int _nextStopGap = 3;
 
     // Treadmill pool: every chunk instance is built ONCE, then reused by repositioning it.
     // Nothing is Instantiated/Destroyed or toggled active/inactive during play — that re-activation
@@ -49,13 +56,38 @@ public class LevelLayoutGenerator : MonoBehaviour
 
     void Start()
     {
+        if (PassengerPool.Instance == null)
+            new GameObject("PassengerPool").AddComponent<PassengerPool>();   // pre-build passengers at load
+
+        if (FindFirstObjectByType<TrafficSpawner>() == null)
+            new GameObject("TrafficSpawner").AddComponent<TrafficSpawner>(); // traffic to dodge (auto)
+
         Prewarm();                 // build all instances up front (during load)
 
+        _nextStopGap = Random.Range(minStopGap, maxStopGap + 1);
         previousChunk = firstChunk;
 
         for (int i = 0; i < chunksToSpawn; i++)
         {
             PickAndSpawnChunk();   // reuses the prewarmed instances
+        }
+
+        MakePrePlacedChunkAStop();
+    }
+
+    // The starting chunk the bus sits on is pre-placed in the scene (not spawned by the pool), so the
+    // generator never calls OnActivated on it. Give it a bus stop too, on load.
+    void MakePrePlacedChunkAStop()
+    {
+        HashSet<GameObject> roots = new HashSet<GameObject>();
+        foreach (TriggerExit te in FindObjectsByType<TriggerExit>(FindObjectsSortMode.None))
+        {
+            GameObject root = te.transform.root.gameObject;
+            if (root.GetComponent<PooledChunk>() != null) continue;   // pooled chunk — skip
+            if (!roots.Add(root)) continue;                            // already handled this chunk
+            ChunkContent cc = root.GetComponentInChildren<ChunkContent>(true);
+            if (cc == null) cc = root.AddComponent<ChunkContent>();
+            cc.OnActivated(true);
         }
     }
 
@@ -136,38 +168,57 @@ public class LevelLayoutGenerator : MonoBehaviour
 
         GameObject objectFromChunk = chunkToSpawn.levelChunks[Random.Range(0, chunkToSpawn.levelChunks.Length)];
         previousChunk = chunkToSpawn;
-        GetFromPool(objectFromChunk, spawnPosition + spawnOrigin);
+
+        bool isStop = false;
+        _chunksSinceStop++;
+        if (_chunksSinceStop >= _nextStopGap)
+        {
+            isStop = true;
+            _chunksSinceStop = 0;
+            _nextStopGap = Random.Range(minStopGap, maxStopGap + 1);
+        }
+
+        GetFromPool(objectFromChunk, spawnPosition + spawnOrigin, isStop);
+    }
+
+    // A "straight" chunk = entry/exit on opposite directions (N<->S or E<->W). Stops only go on these.
+    bool IsStraight(LevelChunkData d)
+    {
+        return (d.entryDirection == LevelChunkData.Direction.North && d.exitDirection == LevelChunkData.Direction.South)
+            || (d.entryDirection == LevelChunkData.Direction.South && d.exitDirection == LevelChunkData.Direction.North)
+            || (d.entryDirection == LevelChunkData.Direction.East && d.exitDirection == LevelChunkData.Direction.West)
+            || (d.entryDirection == LevelChunkData.Direction.West && d.exitDirection == LevelChunkData.Direction.East);
     }
 
     // Reuse an idle (parked) instance of 'prefab' by moving it into place and re-arming its
     // trigger(s). No SetActive, no rebuild. Only Instantiates if the pool was somehow exhausted.
-    GameObject GetFromPool(GameObject prefab, Vector3 position)
+    GameObject GetFromPool(GameObject prefab, Vector3 position, bool isStop)
     {
         Queue<GameObject> q;
         if (pool.TryGetValue(prefab, out q) && q.Count > 0)
         {
             GameObject reused = q.Dequeue();
             reused.transform.SetPositionAndRotation(position, Quaternion.identity);
-            ActivateChunk(reused);
+            ActivateChunk(reused, isStop);
             return reused;
         }
 
         // Fallback (rare): pool ran dry for this variant — raise prewarmPerVariant if you see this hitch.
         GameObject created = CreateInstance(prefab, position);
-        ActivateChunk(created);
+        ActivateChunk(created, isStop);
         return created;
     }
 
-    // Re-arm a chunk's triggers and (re)activate its world content (crowd, and later bus stops) when
-    // it's placed into play. Pooled chunks are never toggled active, so this is the explicit "I'm live
-    // now" signal — the content rides the chunk and only resets here, never re-Instantiates mid-game.
-    void ActivateChunk(GameObject chunk)
+    // Re-arm a chunk's triggers and (re)activate its bus stop when it's placed into play. Pooled chunks
+    // are never toggled active, so this is the explicit "I'm live now" signal — content rides the chunk
+    // and only resets here, never re-Instantiates mid-frame.
+    void ActivateChunk(GameObject chunk, bool isStop)
     {
         TriggerExit[] triggers = chunk.GetComponentsInChildren<TriggerExit>(true);
         for (int i = 0; i < triggers.Length; i++) triggers[i].ReArm();
 
         ChunkContent[] contents = chunk.GetComponentsInChildren<ChunkContent>(true);
-        for (int i = 0; i < contents.Length; i++) contents[i].OnActivated();
+        for (int i = 0; i < contents.Length; i++) contents[i].OnActivated(isStop);
     }
 
     // Make a brand-new instance (the only place we Instantiate). Built active.

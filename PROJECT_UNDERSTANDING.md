@@ -88,10 +88,10 @@ g:\Bame Plastic\
 ├── Assets/
 │   ├── Scenes/        BamePlastic.unity        ← the one playable scene
 │   ├── Scripts/
-│   │   ├── Core/         BusController.cs, BusTag.cs, ExtensionMethods.cs
+│   │   ├── Core/         BusController.cs, GameInput.cs, BusTag.cs, ExtensionMethods.cs
 │   │   ├── Generation/   LevelLayoutGenerator.cs, LevelChunkData.cs, TriggerExit.cs, PooledChunk.cs
 │   │   ├── Environment/  DayNightController.cs, FloatingOrigin.cs, BusCameraFollow.cs
-│   │   ├── Gameplay/      ShiftManager.cs, RivalBus.cs, ChunkContent.cs, Obstacle.cs, TrafficSpawner.cs (traffic not yet wired)
+│   │   ├── Gameplay/      ShiftManager, RivalBus, ChunkContent (bus-stop host), Passenger, PassengerPool, BusPassengers, Conductor, InsideConductor, RoleController, Obstacle, TrafficSpawner
 │   │   ├── Visual/        Billboard.cs, BillboardCharacter.cs, BillboardDemo.cs (placeholder sprite people)
 │   │   └── UI/            ShiftHud.cs
 │   ├── Editor/        BakeRoadMeshes.cs, ReportWorldScale.cs, ApplyWorldScale.cs   ← Tools ▸ Bame Plastic ▸ …
@@ -127,6 +127,7 @@ g:\Bame Plastic\
 ### Core/
 - **`BusController.cs`** — ★ the player vehicle. **Sphere-physics arcade controller**: a detached `Rigidbody` sphere drives the physics (forces in `FixedUpdate`); the visible bus follows it each `Update`. **Legacy Input Manager** (`W` accel, `S` brake, `Horizontal` steer, `Jump`/Space hold = drift → release = boost). Drift tiers swap spark colors; `Boost()` uses **DOTween**. Ground-normal alignment via raycast. **`ApplyImpact(speedMultiplier)`** — public; obstacles/hazards call it to shed speed + cancel drift on contact. → This is the Driver-role movement prototype; lane constraints not yet added (intentionally kept as free-roam track for now).
   - **Setup note:** the **sphere Rigidbody has Interpolate ON** (needed for the smooth camera to not jitter).
+- **`GameInput.cs`** — ★ central input on the **new Input System**, code-defined (no asset). Singleton, auto-creates. Action sets **Driving** (accelerate/brake/steer/drift) + **OnFoot** (move/action/altAction) + global **toggleRole**; `EnableDriving()`/`EnableOnFoot()` switch sets. Each binding has keyboard + gamepad. The bus + both conductors read from here; `RoleController` flips the active set.
 - **`BusTag.cs`** — marker component identifying the player bus so chunk triggers / obstacles detect it.
 - **`ExtensionMethods.cs`** — `Remap(...)` helper used by drift math.
 
@@ -144,9 +145,15 @@ g:\Bame Plastic\
 ### Gameplay/ — *shift economy + traffic*
 - **`ShiftManager.cs`** — ★ the run/clock/score spine. **Singleton, single source of truth** for the **shift timer (~10-min day→night), your taka, bus health, and the rival leaderboard.** Public API `AddEarnings()` / `Damage()` / `Repair()` is what gameplay systems (and later the backend) push into. Drives `DayNightController` so **dusk = shift end**, ends the run + shows the summary, `R` restarts. **One-component setup:** auto-finds the day/night controller, auto-generates rivals, spawns the HUD. Contains a clearly-marked **TEMP placeholder income** (passive trickle + `E` debug fare, `H` debug damage) to be deleted once passenger fares feed `AddEarnings()`.
 - **`RivalBus.cs`** — plain serializable class: a competing company bus that *simulates* rising earnings (`earnRate` + `burstiness`). The HUD reads only `Taka`, so a real AI / networked bus can replace it later with **no UI change**.
-- **`ChunkContent.cs`** — ★ makes a chunk's world content **ride the treadmill pool**. Built once as **children of the chunk** (at load), then only reset (not re-Instantiated) when the chunk is reused. The generator auto-adds it (toggle `autoPopulateChunks`) and calls `OnActivated()` on each chunk when it goes live (sibling concept to `TriggerExit.ReArm()`). Hosts the placeholder roadside **crowd** now; **bus stops + waiting passengers** next. *(This is the pattern ALL world entities must follow — see §7.)*
-- **`Obstacle.cs`** — *(written, NOT yet wired)* trigger that calls `BusController.ApplyImpact` on `BusController` contact; optional `destroyOnHit`.
-- **`TrafficSpawner.cs`** — *(written, NOT yet wired)* spawns/recycles obstacle prefabs ahead of the bus (`spawnAhead`, `lateralSpread`, `spawnInterval`, `maxActive`, ground-raycast seating). To wire: create the spawner + an obstacle prefab (e.g. a `raceCar*.fbx` placeholder), assign refs, tune `lateralSpread` to road width.
+- **`ChunkContent.cs`** — ★ the chunk's **bus-stop host**, riding the treadmill pool. The generator auto-adds it and calls `OnActivated(isStop)` each time a chunk goes live; **every 3–4 straight chunks is a stop**. A stop places an indicator on the LEFT of the road and arranges waiting passengers in **clumps + scattered randoms**; when the bus pulls up slow & near, ~half walk to the door and board. Built lazily (first time it's a stop) then only reset on reuse — never re-Instantiated. *(This is the pattern ALL world entities follow — see §7.)*
+- **`Passenger.cs`** — placeholder passenger, transform-driven (kinematic — safe on pooled/teleporting chunks). Lifecycle: Waiting → **Gathering** at the curb (when the bus approaches `gatherRange`) → walk to the moving door → board (re-parent into the cabin, pay) → **Aboard** (rides the bus) → leaves after a dwell, returns to the pool. Colour = state (clothing waiting, yellow heading, green aboard).
+- **`BusPassengers.cs`** — on the bus: door position + bus speed, **1-by-1** seat assignment (staggered by `boardInterval`), a **Cabin** transform + grid of seat slots that boarded passengers re-parent into so they **ride the bus** (position, turns, pothole bumps), and banks fares into `ShiftManager`. Auto-creates DoorAnchor + Cabin + slots; tune `cabinLocalCenter`/`cabinLocalSize` to your bus interior. (Board→pay replaces placeholder income — turn off `ShiftManager.enablePlaceholderIncome`.)
+- **`PassengerPool.cs`** — global pool of passengers, **pre-built at load** (no mid-game Instantiate). Stops borrow waiting passengers; they're returned when un-boarded or when an aboard passenger leaves. Auto-created by the generator at startup.
+- **`Conductor.cs`** — Conductor 1, the door conductor you control: a billboard moved with WASD (camera-relative). `Grab` (E) scoops the nearest waiting passenger and carries them; pressing again / `Throw` (Q) **throws them in an arc** to the door (they board on landing). Rides at the bus door when not controlled. Transform-driven.
+- **`InsideConductor.cs`** — Conductor 2, the inside conductor: a billboard that rides the **Cabin** and, when controlled, walks the cabin (WASD, clamped to the cabin footprint). **Interactive haggle:** `E` near an aboard passenger starts arguing — the demand climbs (shown on a screen prompt); `E` again locks it in for that bonus, but each passenger has a **hidden patience** and pushing past it = refused (nothing). Builds its own small screen-space prompt.
+- **`RoleController.cs`** — single-player convenience that cycles control + camera across the three roles with `C`: **Driver → Conductor 1 → Conductor 2 → …** (the real game has one player per role, simultaneous). Conducting sets `BusController.controlEnabled=false`, so the bus simply **coasts** (no forced stop/freeze, no auto-drive) — Conductor 2 works whether the bus is rolling or stopped, and a bulletproof **ground-clamp** in BusController keeps it from ever sinking through the road. Both conductors use a close ~30° chase cam on the conductor; Conductor 2 also gets a **roof cutaway** — an oblique camera **clip plane** slices off the top `roofCut` (~30%) of the bus so you see into the cabin (single-mesh-safe; `flipCut` if the wrong half clips). Auto-finds bus + camera, auto-creates both conductors. Uses `BusCameraFollow.Retarget()` (heading from the bus so billboard conductors don't feed the chase yaw). Add this to a manager object.
+- **`Obstacle.cs`** — traffic that penalises the bus on trigger contact: `ApplyImpact` (sheds speed) + `ShiftManager.Damage` (bus health). Robust detection (matches the bus's physics sphere by Rigidbody, or BusController/BusTag). Tunables `speedAfterHit`, `damageOnHit`, `hideOnHit`.
+- **`TrafficSpawner.cs`** — bus-relative traffic: builds a small **pool** of code-generated placeholder vehicles (coloured boxes + trigger + `Obstacle`, no prefabs) and keeps them ahead of the bus, recycling each ahead once passed (no mid-game Instantiate). Auto-finds the bus; **auto-created by the generator** (or add one to tune `count`/`lateralSpread`/`damageOnHit`/`groundMask`). ⚠️ Self-managed pool (not chunk/bus-parented) — needs origin-shift handling when FloatingOrigin returns.
 
 ### Visual/ — *placeholder 2.5D characters*
 - **`Billboard.cs`** — rotates a sprite to face the camera (upright/yaw by default). The 2.5D billboard trick; goes on every character/prop sprite.
@@ -180,7 +187,7 @@ g:\Bame Plastic\
 
 - **Engine:** Unity **6000.4.6f1**, URP `17.4.0`, Cinemachine `3.1.6` (installed, unused — `BusCameraFollow` is a custom script instead).
 - **⚠️ ProBuilder (`com.unity.probuilder`) is REQUIRED.** The road pieces (`TrackCurved`, `RevisedTrack`) are ProBuilder meshes (`PolyShape` + `ProBuilderMesh`). If the package is missing, the roads don't render (they show as "missing script" + empty MeshFilters — exactly what happened when the project was first combined). Don't remove it. (See memory note `probuilder-roads`.) The bake tool (§4 Editor) can later convert them to static meshes to drop the runtime dependency.
-- **Input:** `activeInputHandler = 2` ("Both"). Gameplay uses **legacy** `Input.*`. `PlayerInputActions.inputactions` is registered project-wide but unused (harmless yellow warning). Plan: keep legacy until 3-player multiplayer, then revisit the new Input System.
+- **Input:** the **new Input System** drives gameplay via **`GameInput`** (code-defined actions — no `.inputactions` asset; keyboard + gamepad work out of the box). Two action sets — **Driving** (bus) and **OnFoot** (conductors); `RoleController` enables exactly one, which is what stops input leaking to the bus while you're on foot. **`activeInputHandler` must be "Both" or "Input System Package (New)"** (Project Settings ▸ Player). A few **debug keys** still use legacy `Input.*` (generator `T`, ShiftManager `E/H/R`) — fine under "Both".
 - **Other packages:** AI Navigation (NavMesh), Multiplayer Center (tooling only — no netcode yet), Post-processing, Timeline, uGUI, Visual Scripting, Input System.
 - **Build settings:** scene list → `Assets/Scenes/BamePlastic.unity`.
 - **URP config:** active = `Settings/Mobile_RPAsset` + `PC_RPAsset` (+ renderers) + root `UniversalRenderPipelineGlobalSettings.asset`. Don't move/delete without updating ProjectSettings.
@@ -266,7 +273,39 @@ Java + Spring Boot over REST + WebSocket — the largest remaining AOOP piece (e
 - Added `ApplyWorldScale` (Tools menu): shrinks chunk prefab scale + the 5 `chunkSize` SOs together by a factor (default 0.05 → road ~22 m, turn radius ~21 m, tile ~84 m), leaving bus/camera/physics untouched. Idempotent + retunable.
 - Made placeholder characters **scale-independent**: `BillboardCharacter` now divides by parent lossyScale (always ~1.8 m even parented to a scaled chunk), and `ChunkContent` places crowd by **world-metre offsets** (no longer inheriting the 144 m-giant / clustering bugs).
 
+### 2026-06-05 — Bus stops + boarding loop
+- `ChunkContent` rewritten from ambient crowd into a **bus-stop host**: generator marks every 3–4 **straight** chunks as a stop; stop spawns an indicator on the LEFT + waiting passengers in **clumps + randoms** (kinematic, ride the chunk). Added `Passenger` (walk→board→pay→recycle state machine) and `BusPassengers` (on the bus: door anchor, speed gate, 1-by-1 boarding, banks fares to `ShiftManager`). Bus pulls up slow & near → ~45% board → real taka. Setup: add `BusPassengers` to the bus, turn off placeholder income. *(Pending playtest/tuning: door position, stop side offset, board speed.)*
+
+### 2026-06-05 — Curb gather-up + cabin persistence
+- Two-phase pickup: passengers **gather at the curb** when the bus is within `gatherRange` (~45 m), then **board** within `boardRange` (~22 m) + slow. Fixes "they only react when I'm right on top of them."
+- Added **`PassengerPool`** (global, pre-built at load); `ChunkContent` now borrows from it (returns un-boarded ones on reset) instead of a per-chunk pool. Boarded passengers **re-parent into the bus `Cabin`** and ride it, then **leave after a dwell** and return to the pool (sustainable, no depletion). FloatingOrigin recenter hard-disabled (`recenter=false`) — was teleporting the bus at threshold 100.
+
+### 2026-06-05 — Conductor 1 + crowd tuning
+- Bumped crowd (~30/stop) + stops every 2–3 chunks (set `minStopGap`/`maxStopGap` on the LevelGenerator instance), pool → 250.
+- Added **Conductor 1**: `Conductor` (WASD billboard, grab/throw) + `RoleController` (`C` toggles driver↔conductor; bus coasts while conducting via `BusController.controlEnabled`) + `BusCameraFollow.Retarget` (target/heading swap). Throw = passenger flies to door + boards; physics-arc throw is later polish.
+
+### 2026-06-05 — Conductor 2
+- Added **`InsideConductor`** (Conductor 2): rides + walks the cabin, `E` haggles aboard passengers for a bonus fare (instant in v1). `RoleController` now cycles **Driver→C1→C2** with `C`, hides the roof + uses a top-down camera for C2 (`BusCameraFollow.Retarget` gained a pitch param). Base fare is still collected on board (so solo driving earns); haggle is a bonus on top — the strict "unpaid-until-conductor / lost if missed" model is a future toggle.
+
+### 2026-06-05 — New Input System migration
+- Gameplay input moved off legacy `Input.*` to the **new Input System** via code-defined **`GameInput`** (no `.inputactions` asset; keyboard + gamepad). Driving and OnFoot are **separate action sets**; `RoleController` enables one at a time — which fixes "the bus moves while I'm controlling a conductor" (the bus's actions are simply disabled on foot). Migrated `BusController`, `Conductor`, `InsideConductor`, `RoleController`. Debug keys (`T`, `E/H/R`) stay legacy under "Both". Requires `activeInputHandler` = Both or New.
+
+### 2026-06-05 — Driver stakes v1 (traffic + bus health)
+- Wired traffic: `TrafficSpawner` (pooled, code-gen placeholder vehicles, bus-relative, auto-created) + `Obstacle` (trigger → shed speed + `ShiftManager.Damage`). Added `BusController.Instance` and **health-scaled acceleration** (`HealthFactor` 0.4–1.0) so a battered bus is sluggish — dodging traffic now matters. Hits are pass-through triggers (physical bump is later polish).
+
+### 2026-06-05 — Conductor polish
+- **Interactive haggle** (C2): `E` starts arguing, the demand climbs on-screen, `E` locks it in; each passenger has a hidden patience — overshoot = refused. **Throw arc** (C1): thrown passengers fly to the door on a parabola, then board. (Further driver stakes — potholes/police/poaching — dropped from the plan per direction.)
+
+### 2026-06-05 — Conductors are motion-independent (no freeze, no auto-drive)
+- The 3 roles are **simultaneous players**, so we don't force the bus for conducting. Tried freeze (rejected) and auto-drive (rejected); settled on: when no human drives it the bus just **coasts**, and a **bulletproof ground-clamp** (`GroundClamp()` — raycast from above the sphere, keep it on the highest non-bus surface, layer/thin-collider-independent) stops it ever falling through — so Conductor 2 works whether the bus is rolling or stopped. (Memory: `three-players-bus-always-moving`.)
+
+### 2026-06-07 — Clean bus rig + bus-tuned controller + feel/juice
+- **Rebuilt the player bus** on the Volvo B10M with a clean rig (Player → Sphere[+BusTag] / Normal → BusModel → Front_/Back_Wheels; root sits at the ground-contact point = sphere − radius). Editor tools: `Bame ▸ Build Clean Bus Rig`, `Fit Bus To Ground` (scale/centre/ground, snaps scale to 1), `Wheels ▸ Assign Selection as Front/Back Wheels` (pivot at axle).
+- **Rewrote BusController** for the bus: heavy pickup + strong brakes, speed-gated steering (no spin-in-place), automatic gearbox (`Gear`/`Rpm01`/`SpeedKmh`/`SpeedNormalized`/`Shifting` exposed), grip-vs-slide drift (small `driftAngle`, big `driftLean`), wheels roll from actual velocity + auto-measured radius, velocity-based ground hold (no jitter). Dropped all kart cruft (tiers/turbo/DOTween/particles).
+- **Feel & juice:** `SpeedometerHud` (km/h + gear + RPM bar), `BusAudio` (procedural two-tone horn — zero clips; engine synth tried then removed as too harsh), camera FOV-by-speed + impact shake via `BusController.Impacted`. Added always-on `horn` input (H / gamepad north). (Drift shake + bus lights were tried and removed per direction.)
+- **Cabin sim (push-to-seat):** riders **sit first**, filling seats **front→back**; at ≈70% (`seatStandThreshold`) they **stand at the front of the centre aisle**. Conductor 2 is **confined to the aisle lane** (`aisleHalfWidth`), **slows** in the crowd, and **shoves** (Q) a standing rider, who **walks** back to a random free seat or the backmost free standing spot. `BusPassengers.CabinSpot` + front-ordered `_seats`/`_stands`; `Passenger` holds a `CabinSpot` (`PushTo` to walk). Randomness via random seat pick + `standJitter`.
+
 ### Next up (not done)
-Passenger economy & demand stops (replaces placeholder income) · driver stakes (traffic/health, potholes, police, poaching) · the two conductor roles · re-implement floating origin · bake roads when geometry is final · Spring Boot backend.
+Physical rival buses + park-to-poach · traffic police + weighty collisions · re-implement floating origin (+ shift traffic pool) · save the bus prefab + spawn point · backend (Spring Boot).
 
 *Future session: §1 is design intent, not implemented fact. Verify any file/symbol named here still exists before relying on it — this is an early, fast-moving prototype.*

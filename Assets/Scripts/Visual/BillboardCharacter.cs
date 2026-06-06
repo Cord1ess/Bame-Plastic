@@ -8,6 +8,7 @@ using UnityEngine;
 public class BillboardCharacter : MonoBehaviour
 {
     public SpriteRenderer sr;
+    public float heightMeters = 1.8f;
 
     const int TexW = 64, TexH = 128;
     static Sprite _sharedSprite;
@@ -29,15 +30,20 @@ public class BillboardCharacter : MonoBehaviour
 
         BillboardCharacter bc = go.AddComponent<BillboardCharacter>();
         bc.sr = sr;
-
-        // Size in WORLD units regardless of the parent's scale. Chunks are scaled, so without this a
-        // person parented to a chunk would inherit that scale (the 144 m giants). Dividing by the parent's
-        // lossyScale makes a person always ~`height` metres whether parented to a chunk, the bus, or nothing.
-        float unitHeight = TexH / 100f;                       // sprite is 100 px/unit -> 1.28 units tall
-        float worldScale = height / unitHeight;
-        Vector3 p = parent != null ? parent.lossyScale : Vector3.one;
-        go.transform.localScale = new Vector3(worldScale / NonZero(p.x), worldScale / NonZero(p.y), worldScale / NonZero(p.z));
+        bc.heightMeters = height;
+        bc.ApplyHeight();
         return bc;
+    }
+
+    /// Re-fit the sprite to `heightMeters` in WORLD units for the CURRENT parent's scale. Chunks/bus
+    /// have different scales, so call this after Create AND after any re-parent (chunk -> bus, etc.) so
+    /// a person is always ~`heightMeters` tall and never inherits the chunk scale (the 144 m giants).
+    public void ApplyHeight()
+    {
+        float unitHeight = TexH / 100f;                       // sprite is 100 px/unit -> 1.28 units tall
+        float worldScale = heightMeters / unitHeight;
+        Vector3 p = transform.parent != null ? transform.parent.lossyScale : Vector3.one;
+        transform.localScale = new Vector3(worldScale / NonZero(p.x), worldScale / NonZero(p.y), worldScale / NonZero(p.z));
     }
 
     static float NonZero(float v) => Mathf.Abs(v) < 1e-6f ? 1f : v;

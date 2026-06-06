@@ -16,8 +16,13 @@ public class FloatingOrigin : MonoBehaviour
     public float threshold = 100.0f;
     public LevelLayoutGenerator layoutGenerator;
 
+    [Tooltip("OFF by default: the recenter teleport destabilises the physics bus and isn't needed for a ~10-min shift (the world stays small). Leave off until a bus-anchored, physics-safe version is built.")]
+    public bool recenter = false;
+
     void LateUpdate()
     {
+        if (!recenter) return;
+
         Vector3 cameraPosition = gameObject.transform.position;
         cameraPosition.y = 0f;
 

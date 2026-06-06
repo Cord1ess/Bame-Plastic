@@ -27,15 +27,49 @@ public class BusCameraFollow : MonoBehaviour
     [Tooltip("Heading (yaw) follow speed (higher = snappier behind-the-bus on turns).")]
     public float yawLerpSpeed = 3.5f;
 
+    [Header("Juice")]
+    [Tooltip("Extra FOV added at top speed (sense of speed).")]
+    public float fovKick = 12f;
+    public float fovLerp = 4f;
+    [Tooltip("Shake kick on a full-speed impact.")]
+    public float impactShake = 0.6f;
+    public float shakeDecay = 3f;
+
     Vector3 _vel;
     float _yaw;
     bool _snapped;   // first frame snaps instantly so the camera never starts far from the bus
+    Transform _yawSource;  // if set, take heading from this instead of the target (e.g. the bus while following the billboard conductor)
+    Camera _cam;
+    float _baseFov;
+    float _shake;
+
+    void Start()
+    {
+        _cam = GetComponent<Camera>();
+        if (_cam != null) _baseFov = _cam.fieldOfView;
+    }
+
+    void OnEnable() { BusController.Impacted += OnImpact; }
+    void OnDisable() { BusController.Impacted -= OnImpact; }
+    void OnImpact(float severity) { _shake += severity * impactShake; }
+
+    /// Swap who the camera follows (and optionally where its heading comes from). Used by RoleController
+    /// to switch between the bus (driving) and the conductor — a billboard with no meaningful heading.
+    public void Retarget(Transform newTarget, Transform yawSource, float newDistance, float newHeight, float newPitch)
+    {
+        target = newTarget;
+        _yawSource = yawSource;
+        distance = newDistance;
+        height = newHeight;
+        pitch = newPitch;
+        _snapped = false;   // re-snap to the new target next frame
+    }
 
     void LateUpdate()
     {
         if (!target) return;
 
-        float targetYaw = target.eulerAngles.y;
+        float targetYaw = (_yawSource != null ? _yawSource : target).eulerAngles.y;
 
         // First frame: snap directly behind the bus with no damping. This keeps the camera near
         // the bus from frame one, so FloatingOrigin doesn't see a far-away camera at startup and
@@ -54,6 +88,27 @@ public class BusCameraFollow : MonoBehaviour
         _yaw = Mathf.LerpAngle(_yaw, targetYaw, yawLerpSpeed * Time.deltaTime);
         transform.position = Vector3.SmoothDamp(transform.position, DesiredPosition(), ref _vel, positionSmoothTime);
         transform.rotation = Quaternion.Euler(pitch, _yaw, 0f);  // fixed ~30 deg look-down
+
+        ApplyJuice();
+    }
+
+    // FOV widens with speed; camera shakes on impacts and (subtly) while drifting.
+    void ApplyJuice()
+    {
+        BusController bus = BusController.Instance;
+        float speedN = bus != null ? bus.SpeedNormalized : 0f;
+
+        if (_cam != null)
+            _cam.fieldOfView = Mathf.Lerp(_cam.fieldOfView, _baseFov + speedN * fovKick, fovLerp * Time.deltaTime);
+
+        // Shake only on impacts now (no drift shake).
+        _shake = Mathf.MoveTowards(_shake, 0f, shakeDecay * Time.deltaTime);
+        if (_shake > 0.0001f)
+        {
+            Vector3 off = Random.insideUnitSphere * _shake;
+            transform.position += off;
+            transform.rotation *= Quaternion.Euler(off.y * 8f, off.x * 8f, 0f);
+        }
     }
 
     Vector3 DesiredPosition()
