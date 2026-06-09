@@ -8,6 +8,7 @@ using UnityEngine;
 /// position damping tracks a delta (current -> desired), which a uniform world shift doesn't
 /// disturb, so there's no jump at recenter. Keep FloatingOrigin (+ its layoutGenerator) on this
 /// same GameObject.
+[ExecuteAlways]
 public class BusCameraFollow : MonoBehaviour
 {
     [Header("Target")]
@@ -15,11 +16,11 @@ public class BusCameraFollow : MonoBehaviour
 
     [Header("Framing")]
     [Tooltip("Distance behind the bus.")]
-    public float distance = 8f;
+    public float distance = 12.5f;
     [Tooltip("Height above the bus.")]
-    public float height = 5f;
-    [Tooltip("Fixed downward look pitch in degrees (~30 per the design).")]
-    public float pitch = 30f;
+    public float height = 8f;
+    [Tooltip("Fixed downward look pitch in degrees.")]
+    public float pitch = 26f;
 
     [Header("Smoothing")]
     [Tooltip("Position follow smooth time in seconds (higher = laggier/floatier).")]
@@ -67,9 +68,28 @@ public class BusCameraFollow : MonoBehaviour
 
     void LateUpdate()
     {
-        if (!target) return;
+        if (!target)
+        {
+            // In edit mode there's no RoleController to assign the target, so auto-find the bus so the
+            // Scene/Game view frames it before Play (no more empty-space-until-Play).
+            if (!Application.isPlaying)
+            {
+                var bc = BusController.Instance != null ? BusController.Instance : FindAnyObjectByType<BusController>();
+                if (bc != null) target = bc.transform;
+            }
+            if (!target) return;
+        }
 
         float targetYaw = (_yawSource != null ? _yawSource : target).eulerAngles.y;
+
+        // EDIT MODE: just snap to frame the bus every update (no damping/juice — those need play timing).
+        if (!Application.isPlaying)
+        {
+            _yaw = targetYaw;
+            transform.position = DesiredPosition();
+            transform.rotation = Quaternion.Euler(pitch, _yaw, 0f);
+            return;
+        }
 
         // First frame: snap directly behind the bus with no damping. This keeps the camera near
         // the bus from frame one, so FloatingOrigin doesn't see a far-away camera at startup and

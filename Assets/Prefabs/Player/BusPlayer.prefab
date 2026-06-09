@@ -147,25 +147,36 @@ MonoBehaviour:
   sphere: {fileID: 4848973091056755526}
   frontWheels: {fileID: 2566239422145503719}
   backWheels: {fileID: 8903211268174450933}
+  collisionBoxSize: {x: 0, y: 0, z: 0}
+  collisionBoxCenter: {x: 0, y: 1.6, z: 0}
   controlEnabled: 1
   drifting: 0
-  maxSpeed: 22
+  maxSpeed: 35
   maxReverseSpeed: 6
-  accelRate: 10
+  accelRate: 16
   brakeRate: 32
   coastRate: 6
   gearCount: 5
   shiftTime: 0.18
-  turnSpeed: 85
+  turnSpeed: 24
+  sharpTurnSpeed: 44
+  sharpHoldTime: 1.2
+  steerRamp: 4
+  steerReturn: 5.5
   fullSteerSpeed: 7
   highSpeedSteer: 0.55
   grip: 14
   driftGrip: 2.5
-  driftTurnBoost: 1.5
+  driftTurnScale: 1.2
+  driftTurnScaleSharp: 1.6
+  driftSharpHoldTime: 2
   driftMinSpeed: 6
-  driftAngle: 6
-  driftLean: 16
-  cornerLean: 6
+  driftAngle: 5
+  driftLean: 10
+  driftLeanSpeed: 8.5
+  cornerLean: 3
+  cornerAngle: 0
+  driftBoost: 1.2
   gravity: 10
   layerMask:
     serializedVersion: 2

@@ -14,8 +14,18 @@ public class Obstacle : MonoBehaviour
     [Tooltip("Hide this obstacle once hit (e.g. a knocked-over cone). Off = persistent traffic.")]
     public bool hideOnHit = false;
 
-    void OnTriggerEnter(Collider other)
+    [Tooltip("Min seconds between hits from THIS obstacle. Stops a drag/scrape registering 50x/sec.")]
+    public float hitCooldown = 1f;
+
+    float _lastHitTime = -999f;
+
+    void OnTriggerEnter(Collider other) => TryHit(other);
+    void OnTriggerStay(Collider other) => TryHit(other);   // also catch dragging, but the cooldown gates it
+
+    void TryHit(Collider other)
     {
+        if (Time.time - _lastHitTime < hitCooldown) return;   // debounce: one hit per cooldown, even while dragging
+
         BusController bus = BusController.Instance;
         if (bus == null) return;
 
@@ -24,6 +34,7 @@ public class Obstacle : MonoBehaviour
                   || other.GetComponentInParent<BusTag>() != null;
         if (!isBus) return;
 
+        _lastHitTime = Time.time;
         bus.ApplyImpact(speedAfterHit);
         if (ShiftManager.Instance != null) ShiftManager.Instance.Damage(damageOnHit);
         if (hideOnHit) gameObject.SetActive(false);

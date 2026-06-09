@@ -190,9 +190,19 @@ public class RoadTile : MonoBehaviour
 
         if (_bakeMesh.vertexCount < 3) { _mc.sharedMesh = null; return; }
 
-        if (!Application.isPlaying)      // editor preview: cook synchronously (no Update loop to pick it up)
+        // Cook SYNCHRONOUSLY when there's no real worker thread to offload to:
+        //  • editor preview (no Update loop to pick up the async result), and
+        //  • WEBGL (single-threaded — Task.Run doesn't spawn a thread, so async buys nothing and the
+        //    off-thread handoff is meaningless). Tiles are small (~250 verts) and ~1 builds per frame, so a
+        //    sync cook is cheap. The async path below is for desktop/standalone where threads are real.
+#if UNITY_WEBGL && !UNITY_EDITOR
+        bool synchronous = true;
+#else
+        bool synchronous = !Application.isPlaying;
+#endif
+        if (synchronous)
         {
-            _mc.sharedMesh = null; _mc.sharedMesh = _bakeMesh;
+            _mc.sharedMesh = null; _mc.sharedMesh = _bakeMesh;   // assigning sharedMesh cooks it inline
             return;
         }
 

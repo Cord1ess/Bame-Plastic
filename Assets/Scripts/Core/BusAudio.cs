@@ -1,42 +1,73 @@
 using UnityEngine;
 
-/// Bus horn (procedural two-tone, no clip needed). Hold Horn (H / gamepad north) to honk. Auto-spawns,
-/// 2D audio. Swap in a recorded horn later by replacing the synth in OnAudioFilterRead if you like.
+/// Bus horn. Hold Horn (H / gamepad north) to honk. Auto-spawns, 2D audio.
+///
+/// DESKTOP/STANDALONE: procedural two-tone synth via OnAudioFilterRead (no clip needed).
+/// WEBGL: OnAudioFilterRead is NOT supported (no Unity audio thread — WebGL routes through Web Audio), so
+///   the synth is skipped. To get a horn on web, assign `webglHornClip` (a short recorded honk) and it'll
+///   play via a normal AudioSource on web. Left null = silent horn on WebGL (harmless).
 public class BusAudio : MonoBehaviour
 {
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Bootstrap()
     {
         if (FindAnyObjectByType<BusAudio>() == null)
-            new GameObject("BusAudio").AddComponent<BusAudio>();
+        {
+            var go = new GameObject("BusAudio");
+            go.AddComponent<BusAudio>();
+            SceneHierarchy.Parent(go, SceneHierarchy.Category.World);
+        }
     }
 
     [Range(0f, 1f)] public float hornVolume = 0.32f;
+    [Tooltip("Optional recorded horn used ONLY on WebGL (where the procedural synth can't run). Leave null = silent horn on web.")]
+    public AudioClip webglHornClip;
 
     int _sampleRate;
     double _hornA, _hornB;
     float _env;                 // smooth on/off so it doesn't click
     volatile bool _hornOn;
+    AudioSource _src;
 
     void Start()
     {
         _sampleRate = AudioSettings.outputSampleRate;
         if (_sampleRate <= 0) _sampleRate = 44100;
 
-        AudioSource src = gameObject.AddComponent<AudioSource>();
-        src.clip = AudioClip.Create("busHornLoop", _sampleRate, 1, _sampleRate, false); // silent carrier
-        src.loop = true;
-        src.spatialBlend = 0f;
-        src.playOnAwake = false;
-        src.Play();
+        _src = gameObject.AddComponent<AudioSource>();
+        _src.spatialBlend = 0f;
+        _src.playOnAwake = false;
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        // WebGL: no audio thread → use a clip-based horn (if provided). Don't start the silent carrier
+        // (it only exists to drive OnAudioFilterRead, which WebGL won't call).
+        _src.clip = webglHornClip;
+        _src.loop = true;
+#else
+        // Desktop: silent carrier clip so OnAudioFilterRead is invoked; the synth fills it each block.
+        _src.clip = AudioClip.Create("busHornLoop", _sampleRate, 1, _sampleRate, false);
+        _src.loop = true;
+        _src.Play();
+#endif
     }
 
     void Update()
     {
         GameInput gi = GameInput.Instance;
         _hornOn = gi != null && gi.horn != null && gi.horn.IsPressed();
+
+#if UNITY_WEBGL && !UNITY_EDITOR
+        // WebGL: drive the clip directly (play while held, stop when released).
+        if (_src != null && _src.clip != null)
+        {
+            if (_hornOn && !_src.isPlaying) _src.Play();
+            else if (!_hornOn && _src.isPlaying) _src.Stop();
+            _src.volume = hornVolume;
+        }
+#endif
     }
 
+#if !UNITY_WEBGL || UNITY_EDITOR
     void OnAudioFilterRead(float[] data, int channels)
     {
         float sr = _sampleRate <= 0 ? 44100f : _sampleRate;
@@ -59,4 +90,5 @@ public class BusAudio : MonoBehaviour
             for (int c = 0; c < channels; c++) data[i + c] = sample;
         }
     }
+#endif
 }

@@ -18,6 +18,14 @@ public static class CreateTiledRoad
         go.AddComponent<RoadZone>();
         var streamer = go.AddComponent<TiledRoadStreamer>();
         go.AddComponent<SplineStopSpawner>();   // Phase C: bus stops + crowds (binds to the streamer)
+        go.AddComponent<FootpathPedestrians>(); // L5: pedestrians walking the footpath that join stops as fares
+        go.AddComponent<TrafficSystem>();       // Phase C / L1: deterministic kinematic traffic both ways
+        go.AddComponent<RivalManager>();        // L4: deploys rival buses (TrafficVehicle + RivalBrain) that camp stops
+
+        // Driver guide line ("eagle-vision" optimal path through traffic). Auto-finds bus/road/traffic.
+        var guideGo = new GameObject("DriverGuide");
+        guideGo.transform.SetParent(go.transform, false);
+        guideGo.AddComponent<DriverGuide>();    // self-adds a LineRenderer; aims a reactive guide line at gaps
 
         streamer.RebuildEditorPreview();         // build tiles + seat the bus on the left lane, in the Scene view
 

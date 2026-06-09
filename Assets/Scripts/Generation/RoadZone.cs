@@ -15,13 +15,13 @@ public class RoadZone : MonoBehaviour
     [Tooltip("Chunk length along Z — set to your actual chunk length.")]
     public float roadLength = 40f;
     public int lanesPerDirection = 2;
-    public float laneWidth = 3.25f;
+    public float laneWidth = 6.5f;
     [Tooltip("Central divider width (non-drivable).")]
-    public float medianWidth = 1.5f;
+    public float medianWidth = 1f;
     [Tooltip("Footpath / sidewalk width each side (pedestrians, stalls, stops).")]
-    public float footpathWidth = 2.5f;
+    public float footpathWidth = 4f;
     [Tooltip("Flat ground shoulder beyond each footpath — buildings/stalls sit on this so they aren't floating.")]
-    public float groundWidth = 10f;
+    public float groundWidth = 22f;
     [Tooltip("Left-hand traffic (Bangladesh): your forward lanes are on the LEFT (-X). Untick for right-hand.")]
     public bool leftHandTraffic = true;
 

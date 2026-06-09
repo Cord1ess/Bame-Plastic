@@ -19,11 +19,18 @@ public class RivalBus
 
     // Runtime
     [HideInInspector] public float earnings;
+    [Tooltip("When true, a physical rival bus (RivalBrain) drives this rival's earnings (real fares stolen at " +
+             "stops) and the simulated Tick is skipped. Set by the brain when it links to this standings entry.")]
+    [HideInInspector] public bool drivenByAgent;
 
     public void ResetEarnings() { earnings = 0f; }
 
+    /// A linked RivalBrain calls this when its bus grabs passengers at a stop — real, earned taka.
+    public void AddEarnings(int taka) { earnings += Mathf.Max(0, taka); }
+
     public void Tick(float dt)
     {
+        if (drivenByAgent) return;     // a real agent drives this rival's earnings; no simulation
         // Random multiplier around 1.0 so each rival's total climbs unevenly (feels alive).
         float jitter = 1f + Random.Range(-burstiness, burstiness);
         earnings += earnRate * jitter * dt;

@@ -20,7 +20,12 @@ public class GameInput : MonoBehaviour
             if (_instance == null)
             {
                 _instance = FindAnyObjectByType<GameInput>();
-                if (_instance == null) _instance = new GameObject("GameInput").AddComponent<GameInput>();
+                if (_instance == null)
+                {
+                    var go = new GameObject("GameInput");
+                    _instance = go.AddComponent<GameInput>();
+                    SceneHierarchy.Parent(go, SceneHierarchy.Category.Logic);
+                }
             }
             return _instance;
         }

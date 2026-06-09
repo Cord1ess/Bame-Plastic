@@ -57,6 +57,8 @@ public class TiledRoadStreamer : MonoBehaviour
     [Header("Materials (auto double-sided URP if empty)")]
     public Material roadMaterial, footpathMaterial, groundMaterial, markingMaterial;
     public float curbHeight = 0.15f;
+    [Tooltip("Height of the central median above the road. 0 = flush with the road (just a painted divider).")]
+    public float medianHeight = 0f;
     public float roadThickness = 0.5f;
     public float markingWidth = 0.15f, dashLength = 3f, gapLength = 4f;
 
@@ -228,10 +230,11 @@ public class TiledRoadStreamer : MonoBehaviour
     void BuildProfile()
     {
         float mh = _zone.MedianHalf, dh = _zone.DriveHalf, rh = _zone.RoadHalf, gh = _zone.GroundHalf, h = curbHeight;
+        float mhgt = medianHeight;   // median top height (0 = flush with the road)
         var prof = new float2[]
         {
             new float2(-gh, h), new float2(-rh, h), new float2(-dh, h), new float2(-dh, 0f),
-            new float2(-mh, 0f), new float2(-mh, h), new float2(mh, h), new float2(mh, 0f),
+            new float2(-mh, 0f), new float2(-mh, mhgt), new float2(mh, mhgt), new float2(mh, 0f),
             new float2(dh, 0f), new float2(dh, h), new float2(rh, h), new float2(gh, h),
         };
         int[] seg = { 2, 1, 1, 0, 1, 1, 1, 0, 1, 1, 2 };
@@ -279,7 +282,7 @@ public class TiledRoadStreamer : MonoBehaviour
         _rng = Random.state;
         _haveCarry = false;                       // fresh build: no boundary carry-over yet
         _sharpActive = false; _sharpSwept = 0f; _sinceSharp = 9999f;
-        _busIndexValid = false; _busTileIndex = 0;   // re-seed the bus chain tracker on a fresh build
+        _busIndexValid = false; _busTileIndex = 0; _busTileF = 0f; _busTileFInit = false; _pendingIndexShift = 0;   // re-seed the bus chain tracker on a fresh build
 
         // Build the centreline at WORLD Y=0 (ground plane), independent of this object's transform Y, so the
         // road never sits high (and the bus never spawns in the sky because the road itself was elevated).
@@ -307,6 +310,7 @@ public class TiledRoadStreamer : MonoBehaviour
         {
             AppendTileAhead();                           // inserts at index 0
             _busTileIndex++;                             // everything shifted up one
+            _pendingIndexShift++;                        // so _busTileF compensates next TrackBusIndex
             built++;
             OnForwardAdvanced?.Invoke(_live[0].endPt);
         }
@@ -348,6 +352,52 @@ public class TiledRoadStreamer : MonoBehaviour
             if (d < best) { best = d; bestIdx = i; }
         }
         _busTileIndex = bestIdx;
+
+        // CONTINUOUS bus position along the chain (_busTileF). Projecting the bus onto its nearest span
+        // raw each frame is NOISY near tile boundaries (the nearest-span pick flickers → traffic ghosts and
+        // snaps). So we SMOOTH it: compute the raw projection, then ease _busTileF toward it. The bus's true
+        // road progress is continuous (physics-driven), so the filter tracks it tightly with no lag while
+        // rejecting the per-frame measurement jitter.
+        TileSpan s = _live[_busTileIndex];
+        Vector3 a = s.endPt, c = s.startPt;           // a=front edge (t=0), c=rear edge (t=1)
+        Vector3 seg = c - a;
+        float segLen2 = seg.sqrMagnitude;
+        float t = segLen2 > 1e-6f ? Mathf.Clamp01(Vector3.Dot(b - a, seg) / segLen2) : 0f;
+        float raw = _busTileIndex + t;
+
+        if (!_busTileFInit) { _busTileF = raw; _busTileFInit = true; }
+        else
+        {
+            // append-compensation: when front tiles were added this frame, _busTileIndex (and raw) shifted
+            // up by _pendingIndexShift; apply that to _busTileF first so it stays on the same world spot,
+            // then smooth only the genuine motion.
+            _busTileF += _pendingIndexShift;
+            _pendingIndexShift = 0;
+            _busTileF = Mathf.Lerp(_busTileF, raw, 1f - Mathf.Exp(-12f * Time.deltaTime));  // framerate-independent ease
+        }
+
+        // Bus lateral offset on the road (metres right of centre) — so traffic can treat the bus as an
+        // obstacle in the correct lane. Project the bus onto the road frame at its position.
+        if (SampleRoad(0f, 0f, out Vector3 centre, out Vector3 _, out Vector3 r))
+            _busLateral = Vector3.Dot(b - centre, r);
+    }
+    float _busTileF;
+    bool _busTileFInit;
+    int _pendingIndexShift;
+    float _busLateral;
+    /// The bus's lateral offset on the road (m right of centre). Traffic senses the bus as an obstacle here.
+    public float BusLateral => _busLateral;
+
+    /// The drivable lateral band (m, signed offsets from centre) for the forward (bus) or oncoming side.
+    /// forward+LHT → the -X lanes. Used by DriverGuide to keep the guide line on our drivable lanes.
+    public void SampleBand(bool forward, out float min, out float max)
+    {
+        float mh = _zone != null ? _zone.MedianHalf : 0.75f;
+        float dh = _zone != null ? _zone.DriveHalf : 7.25f;
+        bool lht = _zone == null || _zone.leftHandTraffic;
+        float sideSign = (forward == lht) ? -1f : 1f;     // forward+LHT → -X side
+        float a = sideSign * mh, b = sideSign * dh;
+        min = Mathf.Min(a, b); max = Mathf.Max(a, b);
     }
 
     float SqrToTile(int i, Vector3 b)
@@ -517,6 +567,62 @@ public class TiledRoadStreamer : MonoBehaviour
         return true;
     }
 
+    // --- Road sampling for traffic / world content (road-relative = floating-origin-invariant) ---
+    public float TileLength => tileLength;
+    public int LiveTileCount => _live.Count;
+    /// How far (metres) of road exists ahead of / behind the bus right now. Traffic clamps its range to this.
+    /// Uses the continuous bus position so it matches SampleRoad exactly.
+    public float MetresAhead => (_live.Count - 1 - _busTileF) * tileLength;
+    public float MetresBehind => _busTileF * tileLength;
+
+    /// Sample a point on the road at `metresFromBus` (signed: + ahead, - behind) along the centreline,
+    /// then offset `lateral` metres to the RIGHT of the road. Returns the world position + the road frame
+    /// there (fwd = road direction of travel, right = +X side). Everything is road-relative, so a
+    /// floating-origin recenter never changes the result. Returns false if that distance is off the live road.
+    ///
+    /// The frame (fwd/right) is derived from a FINITE DIFFERENCE of two nearby centreline points, not the
+    /// raw span direction — so it stays CONTINUOUS across span boundaries (the old per-span direction
+    /// snapped at each join, which flipped the lateral offset and made vehicles teleport sideways on curves).
+    public bool SampleRoad(float metresFromBus, float lateral, out Vector3 pos, out Vector3 fwd, out Vector3 right)
+    {
+        pos = default; fwd = Vector3.forward; right = Vector3.right;
+        if (_live.Count < 2 || tileLength <= 0f) return false;
+
+        // tile index increases toward the BACK (_live[0]=front). Ahead of the bus = LOWER tileF.
+        // Use the CONTINUOUS bus position (_busTileF), not the discrete index — otherwise traffic jumps a
+        // whole tile every time a front tile is appended (index++) or the bus crosses a tile boundary.
+        float tileF = _busTileF - metresFromBus / tileLength;
+        if (tileF < 0f || tileF > _live.Count - 1) return false;   // off the live road
+
+        Vector3 center = CenterlineAt(tileF);
+
+        // forward = the travel direction (toward lower metresFromBus = toward the FRONT = lower tileF).
+        // Sample a hair behind (higher tileF) and use (here - behind) so fwd points the way traffic drives.
+        float eps = 0.05f;
+        float tB = Mathf.Min(_live.Count - 1, tileF + eps);
+        float tF = Mathf.Max(0f, tileF - eps);
+        Vector3 ahead = CenterlineAt(tF);
+        Vector3 behind = CenterlineAt(tB);
+        Vector3 d = ahead - behind; d.y = 0f;
+        fwd = d.sqrMagnitude < 1e-8f ? Vector3.forward : d.normalized;
+        right = Vector3.Cross(Vector3.up, fwd).normalized;
+
+        pos = center + right * lateral;
+        return true;
+    }
+
+    /// Continuous centreline position for a fractional tile index. t=0 within a span sits at its endPt (the
+    /// front edge), t=1 at startPt (the rear edge) — and because adjacent spans share that boundary point
+    /// exactly, the piecewise-linear result is C0-continuous (no position jump at joins).
+    Vector3 CenterlineAt(float tileF)
+    {
+        tileF = Mathf.Clamp(tileF, 0f, _live.Count - 1);
+        int i = Mathf.Clamp(Mathf.FloorToInt(tileF), 0, _live.Count - 1);
+        float t = tileF - i;
+        TileSpan s = _live[i];
+        return Vector3.Lerp(s.endPt, s.startPt, t);
+    }
+
     // --- spawn ---
     // Geometric (NO raycast — raycasts depend on async collider bake timing and can hit the bus itself).
     // The road's top surface at a LANE is exactly the centreline Y (profile Y = 0 on the road), so the
@@ -555,6 +661,8 @@ public class TiledRoadStreamer : MonoBehaviour
 
         // seed the chain tracker at the spawn span (the middle tile — matches TryGetSpawnPose)
         _busTileIndex = Mathf.Clamp(_live.Count / 2, 0, _live.Count - 1);
+        _busTileF = _busTileIndex + 0.5f;     // bus spawns mid-span; seed continuous pos so traffic frame-1 is sane
+        _busTileFInit = true;
         _busIndexValid = true;
     }
 

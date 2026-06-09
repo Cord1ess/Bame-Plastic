@@ -12,6 +12,8 @@ using UnityEngine;
 /// passengers Returned to the pool — once the bus is well past them. Nothing is Instantiated mid-game.
 public class SplineStopSpawner : MonoBehaviour
 {
+    public static SplineStopSpawner Instance { get; private set; }
+
     [Header("Placement")]
     [Tooltip("Drop a stop on roughly every Nth advanced section (randomised a little).")]
     public int sectionsPerStop = 4;
@@ -21,8 +23,11 @@ public class SplineStopSpawner : MonoBehaviour
     public float recycleDistance = 70f;
 
     [Header("Waiting crowd")]
-    public int crowdMin = 8;
-    public int crowdMax = 22;
+    [Tooltip("Initial crowd seeded when a stop appears. Keep LOW if FootpathPedestrians (L5) is feeding it — " +
+             "the crowd then visibly grows as walkers arrive. Raise toward crowdMax if you want full stops " +
+             "without walkers.")]
+    public int crowdMin = 3;
+    public int crowdMax = 8;
     public float crowdSpread = 6f;
     public float curbDepth = 1.2f;
 
@@ -62,6 +67,7 @@ public class SplineStopSpawner : MonoBehaviour
 
     void Awake()
     {
+        Instance = this;
         _tiled = GetComponent<TiledRoadStreamer>();
         EnsurePool();
     }
@@ -93,6 +99,7 @@ public class SplineStopSpawner : MonoBehaviour
         PassengerPool pool = go.AddComponent<PassengerPool>();
         pool.poolSize = ensurePoolSize;
         go.SetActive(true);
+        SceneHierarchy.Parent(go, SceneHierarchy.Category.World);
     }
 
     void OnSection(Vector3 leadKnotWorld)
@@ -233,6 +240,104 @@ public class SplineStopSpawner : MonoBehaviour
         if (st.box != null) st.box.SetActive(false);
         _live.RemoveAt(index);
         _freeStops.Push(st);
+    }
+
+    // ---- Pedestrian API (L5): walking pedestrians convert into a stop's waiting crowd ----
+
+    [Header("Walkers (L5)")]
+    [Tooltip("A walking pedestrian joins a stop when within this distance (m) of it.")]
+    public float joinRange = 7f;
+    [Tooltip("Cap on a stop's crowd (seed + joined walkers) so it doesn't balloon forever.")]
+    public int crowdCap = 28;
+
+    /// A footpath walker reached the kerb: if a live stop is within joinRange, add it to that stop's waiting
+    /// crowd (re-parented to ride the road) and return true. The walker keeps the fare it was carrying.
+    public bool TryJoinNearestStop(Passenger walker, Vector3 worldPos)
+    {
+        if (walker == null) return false;
+        Stop best = null; float bestD2 = joinRange * joinRange;
+        for (int i = 0; i < _live.Count; i++)
+        {
+            Stop st = _live[i];
+            if (st.boardingDone || st.crowd.Count >= crowdCap) continue;     // closed or full
+            float d2 = (st.stopPos - worldPos).sqrMagnitude;
+            if (d2 < bestD2) { bestD2 = d2; best = st; }
+        }
+        if (best == null) return false;
+
+        Vector3 wp = worldPos; wp.y = best.stopPos.y;
+        walker.transform.SetParent(transform, true);     // ride the road like the rest of the crowd
+        walker.transform.position = wp;
+        walker.ConvertToWaiting(Palette[_colorRot++ % Palette.Length]);
+        best.crowd.Add(walker);
+        // if the bus is already crowding-up this stop, send the new arrival to the curb too
+        if (best.gathered) walker.BeginGather(CurbPoint(best, best.crowd.Count));
+        return true;
+    }
+
+    // ---- Rival API (L4): rivals find stops ahead and steal waiting passengers ----
+
+    /// World position of the nearest stop AHEAD of `from` (along `fwd`) that still has waiting passengers,
+    /// plus how many wait there. Returns false if none. Rivals use this to pick a stop to camp.
+    public bool TryGetStopAhead(Vector3 from, Vector3 fwd, float maxDist, out Vector3 stopPos, out int waiting)
+    {
+        stopPos = default; waiting = 0;
+        float best = maxDist * maxDist; bool found = false;
+        for (int i = 0; i < _live.Count; i++)
+        {
+            Stop st = _live[i];
+            Vector3 to = st.stopPos - from;
+            if (Vector3.Dot(to, fwd) <= 0f) continue;             // must be ahead
+            int w = CountWaiting(st);
+            if (w <= 0) continue;
+            float d2 = to.sqrMagnitude;
+            if (d2 < best) { best = d2; stopPos = st.stopPos; waiting = w; found = true; }
+        }
+        return found;
+    }
+
+    /// A rival pulled up at `nearStopPos` grabs up to `maxCount` waiting passengers: removes them from the
+    /// crowd, returns them to the pool (they "boarded the rival"), and returns the total fare stolen. The
+    /// player can't get those fares anymore — that's the competition.
+    public int ClaimWaitingPassengers(Vector3 nearStopPos, int maxCount)
+    {
+        Stop st = FindStopNear(nearStopPos);
+        if (st == null) return 0;
+        int taken = 0, fare = 0;
+        for (int c = 0; c < st.crowd.Count && taken < maxCount; c++)
+        {
+            Passenger p = st.crowd[c];
+            if (p == null) continue;
+            if (p.state != Passenger.State.Waiting && p.state != Passenger.State.Gathering) continue;
+            fare += p.Fare;
+            if (PassengerPool.Instance != null) PassengerPool.Instance.Return(p);
+            st.crowd[c] = null;
+            taken++;
+        }
+        st.crowd.RemoveAll(x => x == null);
+        return fare;
+    }
+
+    int CountWaiting(Stop st)
+    {
+        int n = 0;
+        for (int c = 0; c < st.crowd.Count; c++)
+        {
+            Passenger p = st.crowd[c];
+            if (p != null && (p.state == Passenger.State.Waiting || p.state == Passenger.State.Gathering)) n++;
+        }
+        return n;
+    }
+
+    Stop FindStopNear(Vector3 pos)
+    {
+        float best = 64f; Stop found = null;   // within 8m
+        for (int i = 0; i < _live.Count; i++)
+        {
+            float d2 = (_live[i].stopPos - pos).sqrMagnitude;
+            if (d2 < best) { best = d2; found = _live[i]; }
+        }
+        return found;
     }
 
     /// Called by FloatingOrigin after a recenter. Stop boxes + waiting passengers are children of the

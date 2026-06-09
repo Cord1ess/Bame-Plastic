@@ -6,8 +6,8 @@ using UnityEngine.SceneManagement;
 /// company-bus leaderboard. This is the single source of truth the HUD reads and (later) the
 /// Spring Boot backend mirrors — gameplay systems push into it via AddEarnings()/Damage().
 ///
-/// ONE-COMPONENT SETUP: drop this on an empty GameObject ("GameManager"). It auto-finds the
-/// DayNightController, auto-generates rivals if none are set, and spawns the HUD itself.
+/// SETUP: lives on a "ShiftManager" child of the GameManager object (see GameManager). It auto-finds
+/// the DayNightController, auto-generates rivals if none are set, and spawns the HUD itself.
 public class ShiftManager : MonoBehaviour
 {
     public static ShiftManager Instance { get; private set; }
@@ -76,7 +76,7 @@ public class ShiftManager : MonoBehaviour
         if (dayNight != null)
         {
             dayNight.externalTimeControl = true;
-            dayNight.SetTimeOfDay(startTimeOfDay);
+            dayNight.SetShiftProgress(0f);   // begin at sunrise
         }
 
         // One-component setup: spawn the HUD if the scene doesn't already have one.
@@ -84,6 +84,7 @@ public class ShiftManager : MonoBehaviour
         {
             GameObject hud = new GameObject("ShiftHUD");
             hud.AddComponent<ShiftHud>();
+            SceneHierarchy.Parent(hud, SceneHierarchy.Category.UI);
         }
     }
 
@@ -102,11 +103,12 @@ public class ShiftManager : MonoBehaviour
         TimeRemaining -= dt;
         if (TimeRemaining <= 0f) { TimeRemaining = 0f; EndShift(); return; }
 
-        // Day/night tracks the clock (dusk == shift end)
+        // Day/night follows the SHIFT SCHEDULE (quick sunrise → long sunny day → dusk → short night),
+        // shaped by DayNightController's phase fractions — not a flat lerp.
         if (dayNight != null)
         {
             float progress = 1f - (TimeRemaining / shiftDuration);
-            dayNight.SetTimeOfDay(Mathf.Lerp(startTimeOfDay, endTimeOfDay, progress));
+            dayNight.SetShiftProgress(progress);
         }
 
         // Rivals tick

@@ -6,7 +6,7 @@ using UnityEngine;
 /// and return to the pool. (Conductor 1 will add grab/throw; Conductor 2 the seat-shuffle + haggle.)
 public class Passenger : MonoBehaviour
 {
-    public enum State { Hidden, Waiting, Gathering, Held, Thrown, HeadingToDoor, Aboard }
+    public enum State { Hidden, Walking, Waiting, Gathering, Held, Thrown, HeadingToDoor, Aboard }
     public State state = State.Hidden;
 
     public float moveSpeed = 3.5f;
@@ -56,6 +56,8 @@ public class Passenger : MonoBehaviour
 
     public void Setup(BillboardCharacter view) { _view = view; }
 
+    public int Fare => _fare;          // fare this passenger pays (read by rivals stealing them, HUD, etc.)
+
     public void ResetWaiting(int fare, Color baseColor)
     {
         _fare = fare; _bus = null; _spot = null; _haggled = false; _walking = false;
@@ -68,6 +70,26 @@ public class Passenger : MonoBehaviour
     {
         state = State.Hidden; _bus = null; _spot = null; _walking = false;
         if (gameObject.activeSelf) gameObject.SetActive(false);
+    }
+
+    static readonly Color ColWalking = new Color(0.7f, 0.72f, 0.78f);   // muted grey-blue: a pedestrian, not yet a fare
+
+    /// L5: become a pedestrian strolling the footpath (position is driven by FootpathPedestrians). Not a
+    /// waiting fare yet — it converts when it reaches a stop.
+    public void BeginWalking(int fare, Color baseColor)
+    {
+        _fare = fare; _bus = null; _spot = null; _haggled = false; _walking = false;
+        state = State.Walking;
+        if (!gameObject.activeSelf) gameObject.SetActive(true);
+        if (_view != null) { _view.ApplyHeight(); _view.SetColor(ColWalking); }
+    }
+
+    /// L5: a walker that reached a stop turns into a waiting fare (keeps its assigned fare). The caller
+    /// (SplineStopSpawner) adds it to the stop crowd and re-parents it to ride the road.
+    public void ConvertToWaiting(Color baseColor)
+    {
+        state = State.Waiting;
+        if (_view != null) _view.SetColor(baseColor);
     }
 
     // Bus is approaching: move to a spot at the curb and wait there ("crowd up").
