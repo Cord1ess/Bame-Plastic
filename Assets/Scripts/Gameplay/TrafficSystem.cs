@@ -83,6 +83,7 @@ public class TrafficSystem : MonoBehaviour
         v.Acquire(TrafficVehicle.Kind.Bus, _nextId++, metres, lat, Random.Range(busSpeed.x, busSpeed.y), +1,
                   SizeFor(TrafficVehicle.Kind.Bus), color);
         v.Brain = brain;                       // attach AFTER Acquire (Acquire doesn't touch Brain)
+        v.SetSolid(true);                      // rivals are SOLID physics walls — the bus clashes naturally
         _live.Add(v);
         _rivals.Add(v);
         return v;

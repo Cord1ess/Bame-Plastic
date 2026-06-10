@@ -23,6 +23,7 @@ public class FloatingOrigin : MonoBehaviour
     BusController _bc;
     TiledRoadStreamer _tiled;         // the pooled-tile road
     SplineStopSpawner _stops;
+    BuildingSpawner _buildings;       // static roadside buildings (cache their world positions)
 
     void Start() => Resolve();
 
@@ -35,6 +36,7 @@ public class FloatingOrigin : MonoBehaviour
         }
         if (_tiled == null) _tiled = FindAnyObjectByType<TiledRoadStreamer>();
         if (_stops == null) _stops = FindAnyObjectByType<SplineStopSpawner>();
+        if (_buildings == null) _buildings = FindAnyObjectByType<BuildingSpawner>();
     }
 
     void LateUpdate()
@@ -73,6 +75,7 @@ public class FloatingOrigin : MonoBehaviour
         // Notify systems that cache WORLD positions, so they don't snap back to the pre-shift spot.
         if (_tiled != null) _tiled.OnOriginShifted(delta);
         if (_stops != null) _stops.OnOriginShifted(delta);
+        if (_buildings != null) _buildings.OnOriginShifted(delta);
 
         // Push all the moved transforms into the physics engine in ONE controlled call. Otherwise the
         // next FixedUpdate's raycasts/queries trigger an implicit, poorly-timed sync (broadphase

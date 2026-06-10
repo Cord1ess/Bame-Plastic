@@ -15,6 +15,13 @@ public static class PixelUI
     //      no-background HUD text (timer, leaderboard) is cream so it reads on the bright scene. ----
     public static readonly Color PanelFill = new Color32(0x23, 0x29, 0x3d, 0xf2); // dark slate-navy panel (slightly transparent)
     public static readonly Color PanelAlt  = new Color32(0x1a, 0x1f, 0x2e, 0xf2); // deeper slate (tracks/insets)
+    public static readonly Color PanelHover= new Color32(0x32, 0x3a, 0x54, 0xf7); // panel hover (lifted)
+    public static readonly Color PanelPress= new Color32(0x16, 0x1a, 0x28, 0xff); // panel press (sunken)
+
+    // buttons get their OWN brighter fills so they read as raised, tactile controls (not flat like panels)
+    public static readonly Color BtnFill   = new Color32(0x3a, 0x42, 0x5e, 0xff); // button idle (clearly raised)
+    public static readonly Color BtnHover  = new Color32(0x50, 0x5b, 0x80, 0xff); // button hover (brighter)
+    public static readonly Color BtnPress  = new Color32(0x20, 0x25, 0x38, 0xff); // button pressed (sinks dark)
     public static readonly Color Frame     = new Color32(0xe8, 0xdc, 0xc0, 0xff); // soft cream cut-corner frame
     public static readonly Color FrameSoft = new Color32(0x8a, 0x83, 0x9c, 0xff); // muted frame line
 
@@ -31,8 +38,9 @@ public static class PixelUI
     public static Color TextDim => InkDim;
     public static Color EdgeHi => Frame;
 
-    const int Border = 5;          // px frame thickness for the 9-slice panel
-    const int Notch  = 5;          // px of each corner cut off (the "broken square" look)
+    const int Border = 8;          // px frame thickness for the 9-slice panel (chunkier). MUST be >= Notch so
+    const int Notch  = 8;          // the cut corner stays inside the fixed 9-slice corner region (no stretch).
+    public static float BorderPx => Border;   // exposed so widgets pad inside the frame consistently
 
     static Font _font;
     static Sprite _panelSprite, _panelSoftSprite, _flatSprite, _barTrackSprite;
@@ -136,11 +144,13 @@ public static class PixelUI
         return img;
     }
 
-    /// A solid tinted block (flat sprite). Use for bar fills / dividers.
+    /// A solid tinted block (flat sprite). Decorative (fills / dividers / scrims) — NOT a raycast target, so
+    /// it never eats clicks meant for buttons beneath it.
     public static Image Block(Transform parent, string name, Color color)
     {
         var img = MakeImage(parent, name, FlatSprite);
         img.color = color;
+        img.raycastTarget = false;
         return img;
     }
 
@@ -160,6 +170,7 @@ public static class PixelUI
         t.horizontalOverflow = HorizontalWrapMode.Overflow;
         t.verticalOverflow = VerticalWrapMode.Overflow;
         t.supportRichText = true;
+        t.raycastTarget = false;     // labels never block clicks (the button under them must receive them)
         if (outline)
         {
             var ol = go.AddComponent<Outline>();      // subtle dark halo so cream text reads on any background

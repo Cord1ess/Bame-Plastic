@@ -8,12 +8,15 @@ public class Conductor : MonoBehaviour
 {
     public float moveSpeed = 5f;
     public float grabRange = 3f;
+    [Tooltip("How high above the conductor's head the carried passenger is held.")]
+    public float carryHeight = 2.2f;
 
     BillboardCharacter _view;
     Transform _home;
     Camera _cam;
     bool _controlled;
     Passenger _held;
+    Billboard _heldBillboard;   // we disable the carried one's billboard so we can hold it HORIZONTAL overhead
 
     public void Setup(BillboardCharacter view, Transform home)
     {
@@ -37,7 +40,12 @@ public class Conductor : MonoBehaviour
 
     void ReturnHome()
     {
-        if (_held != null) { _held.BeginBoarding(BusPassengers.Instance); _held = null; }
+        if (_held != null)
+        {
+            if (_heldBillboard != null) { _heldBillboard.enabled = true; _heldBillboard = null; }
+            _held.transform.rotation = Quaternion.identity;
+            _held.BeginBoarding(BusPassengers.Instance); _held = null;
+        }
         if (_home != null)
         {
             transform.SetParent(_home, false);
@@ -59,8 +67,13 @@ public class Conductor : MonoBehaviour
         if (moveDir.sqrMagnitude > 0.01f)
             transform.position += moveDir.normalized * moveSpeed * Time.deltaTime;
 
+        // carry HORIZONTALLY overhead: above the head, sprite laid flat (lengthwise across the conductor).
         if (_held != null)
-            _held.transform.position = transform.position + fwd * 0.6f;   // carry in front
+        {
+            _held.transform.position = transform.position + Vector3.up * carryHeight;
+            // lie flat: face up, long axis along the conductor's facing → looks like carried on the head/arms
+            _held.transform.rotation = Quaternion.LookRotation(Vector3.up, fwd);
+        }
 
         if (gi.action.WasPressedThisFrame()) { if (_held == null) TryGrab(); else ThrowHeld(); }
         if (gi.altAction.WasPressedThisFrame()) ThrowHeld();
@@ -76,12 +89,21 @@ public class Conductor : MonoBehaviour
             float d = (p.transform.position - transform.position).sqrMagnitude;
             if (d < bestSqr) { bestSqr = d; best = p; }
         }
-        if (best != null) { best.Grab(); _held = best; }
+        if (best != null)
+        {
+            best.Grab();
+            _held = best;
+            // stop its billboard so we can hold it horizontal (the Billboard re-uprights it every frame otherwise)
+            _heldBillboard = best.GetComponent<Billboard>();
+            if (_heldBillboard != null) _heldBillboard.enabled = false;
+        }
     }
 
     void ThrowHeld()
     {
         if (_held == null) return;
+        if (_heldBillboard != null) { _heldBillboard.enabled = true; _heldBillboard = null; }   // re-upright on release
+        _held.transform.rotation = Quaternion.identity;
         _held.ThrowTo(BusPassengers.Instance);   // arc to the door, then board on landing
         _held = null;
     }

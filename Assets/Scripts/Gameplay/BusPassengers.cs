@@ -161,12 +161,21 @@ public class BusPassengers : MonoBehaviour
         return spot;
     }
 
-    public void CompleteBoard(Passenger p, int fare)
+    /// Registers a passenger as aboard. NO auto-fare — the inside conductor collects each rider's owed fare.
+    public void CompleteBoard(Passenger p)
     {
         _aboard.Add(p);
         BoardedCount++;
-        if (ShiftManager.Instance != null) ShiftManager.Instance.AddEarnings(fare);
     }
+
+    /// Called when the bus is stopped at a stop: any aboard rider who rang the bell starts to alight + walk off.
+    public void ReleaseAlightersAtStop()
+    {
+        for (int i = 0; i < _aboard.Count; i++) if (_aboard[i] != null) _aboard[i].TryAlightAtStop();
+    }
+
+    /// The inside conductor's reachable riders (aboard) — used for nearest-unpaid selection.
+    public System.Collections.Generic.IReadOnlyList<Passenger> Aboard => _aboard;
 
     /// Conductor 2 shoves a standing rider: they walk back to a free seat (random — naturally rear-ward),
     /// or the backmost free standing spot if no seats are free. Returns false if nowhere to go.

@@ -3,6 +3,8 @@ using UnityEngine;
 /// Rotates this object to face the camera each frame — the 2.5D billboard trick. Default keeps the
 /// sprite UPRIGHT (yaw only), like a standing person; FaceCamera fully aligns it to the camera plane.
 /// Put this on any sprite that should always face the player (passengers, conductors, crowd, props).
+/// [ExecuteAlways] so menu-preview crew also face the camera in the editor (not just in play).
+[ExecuteAlways]
 public class Billboard : MonoBehaviour
 {
     public enum Mode { UprightYAxis, FaceCamera }

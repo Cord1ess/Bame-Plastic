@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BAME PLASTIC — Control Hub</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ===================== TOP BAR ===================== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">▣</span>
+      <span class="brand-name">BAME&nbsp;PLASTIC</span>
+      <span class="brand-sub">CONTROL HUB</span>
+    </div>
+    <div class="top-status">
+      <span class="pill" id="pill-backend"><i class="dot"></i> BACKEND</span>
+      <span class="pill" id="pill-db"><i class="dot"></i> DATABASE</span>
+      <span class="pill" id="pill-games"><i class="dot"></i> <b id="pill-games-n">0</b> LIVE</span>
+      <span class="pill" id="pill-conn"><i class="dot"></i> <b id="pill-conn-n">0</b> CONN</span>
+      <span class="endpoint" id="endpoint-label">ws/http://localhost:8080</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- ===================== SIDEBAR ===================== -->
+    <nav class="sidebar">
+      <button class="nav-item active" data-tab="overview">◆ OVERVIEW</button>
+      <button class="nav-item" data-tab="rooms">▤ LOBBIES <b class="nav-count" id="nav-rooms">0</b></button>
+      <button class="nav-item" data-tab="feed">≋ LIVE FEED</button>
+      <button class="nav-item" data-tab="database">▦ DATABASE</button>
+      <button class="nav-item" data-tab="leaderboard">★ LEADERBOARD</button>
+      <button class="nav-item" data-tab="setup">⚙ SETUP &amp; HELP</button>
+      <div class="sidebar-foot">
+        <div class="poll-row">
+          <span>REFRESH</span>
+          <button class="mini-btn" id="poll-toggle">● LIVE</button>
+        </div>
+        <div class="poll-row tiny" id="last-update">—</div>
+      </div>
+    </nav>
+
+    <!-- ===================== CONTENT ===================== -->
+    <main class="content">
+
+      <!-- OVERVIEW -->
+      <section class="tab" id="tab-overview">
+        <div class="banner" id="offline-banner" hidden>
+          <b>⚠ BACKEND OFFLINE.</b> Can't reach <span id="offline-url"></span> —
+          the server isn't running or the URL is wrong. See <a href="#" data-jump="setup">SETUP &amp; HELP ▸</a>
+        </div>
+
+        <div class="grid stats-grid">
+          <div class="panel stat"><div class="stat-k">SERVER</div><div class="stat-v" id="st-server">—</div><div class="stat-sub" id="st-uptime">uptime —</div></div>
+          <div class="panel stat"><div class="stat-k">DATABASE</div><div class="stat-v" id="st-db">—</div><div class="stat-sub" id="st-db-info">—</div></div>
+          <div class="panel stat"><div class="stat-k">LOBBIES</div><div class="stat-v gold" id="st-rooms">0</div><div class="stat-sub" id="st-rooms-sub">0 in-game</div></div>
+          <div class="panel stat"><div class="stat-k">CONNECTIONS</div><div class="stat-v cyan" id="st-conn">0</div><div class="stat-sub" id="st-conn-sub">0 total</div></div>
+        </div>
+
+        <div class="grid two">
+          <div class="panel">
+            <h3 class="panel-title">REALTIME TRAFFIC</h3>
+            <div class="kv"><span>Lobby messages (text)</span><b id="tr-text">0</b></div>
+            <div class="kv"><span>Game frames (binary)</span><b id="tr-bin">0</b></div>
+            <div class="kv"><span>Bytes relayed</span><b id="tr-bytes">0 B</b></div>
+            <div class="kv"><span>Server time</span><b id="tr-clock">—</b></div>
+          </div>
+          <div class="panel">
+            <h3 class="panel-title">DATABASE TABLES</h3>
+            <div id="db-counts" class="db-counts"><div class="muted">—</div></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3 class="panel-title">RECENT ACTIVITY</h3>
+          <div id="overview-feed" class="feed compact"><div class="muted">No activity yet.</div></div>
+        </div>
+      </section>
+
+      <!-- ROOMS / LOBBIES -->
+      <section class="tab" id="tab-rooms" hidden>
+        <h2 class="tab-title">LIVE LOBBIES</h2>
+        <p class="tab-note">Every room held in the server's memory — the lobby + live game sessions. Updates live.</p>
+        <div id="rooms-list" class="rooms-list"><div class="muted">No rooms. Host one in the game to see it here.</div></div>
+      </section>
+
+      <!-- LIVE FEED -->
+      <section class="tab" id="tab-feed" hidden>
+        <h2 class="tab-title">LIVE EVENT FEED</h2>
+        <p class="tab-note">Everything flowing through the realtime socket — connects, joins, role swaps, ready, starts, leaves, game frames.</p>
+        <div class="feed-toolbar">
+          <button class="chip on" data-filter="all">ALL</button>
+          <button class="chip" data-filter="connect">CONNECT</button>
+          <button class="chip" data-filter="join">JOIN/CREATE</button>
+          <button class="chip" data-filter="ready">READY/ROLE</button>
+          <button class="chip" data-filter="start">START</button>
+          <button class="chip" data-filter="binary">GAME</button>
+        </div>
+        <div id="feed" class="feed"><div class="muted">Waiting for events…</div></div>
+      </section>
+
+      <!-- DATABASE -->
+      <section class="tab" id="tab-database" hidden>
+        <h2 class="tab-title">DATABASE</h2>
+        <p class="tab-note">Live contents of every table — counts and the latest rows, straight from the DB.</p>
+        <div class="table-tabs" id="table-tabs"></div>
+        <div id="table-view" class="table-view"><div class="muted">Select a table.</div></div>
+      </section>
+
+      <!-- LEADERBOARD -->
+      <section class="tab" id="tab-leaderboard" hidden>
+        <h2 class="tab-title">COMPANY STANDINGS</h2>
+        <p class="tab-note">Top shift results by earnings — the same data the game's leaderboard shows.</p>
+        <div id="leaderboard" class="leaderboard"><div class="muted">No results yet.</div></div>
+      </section>
+
+      <!-- SETUP & HELP -->
+      <section class="tab" id="tab-setup" hidden>
+        <h2 class="tab-title">SETUP &amp; TROUBLESHOOTING</h2>
+        <div id="setup-content"><!-- filled by app.js so it stays in one place --></div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

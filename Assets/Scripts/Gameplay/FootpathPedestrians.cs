@@ -11,9 +11,10 @@ using Random = UnityEngine.Random;
 [RequireComponent(typeof(TiledRoadStreamer))]
 public class FootpathPedestrians : MonoBehaviour
 {
+    public static FootpathPedestrians Instance { get; private set; }
     [Header("Population")]
     [Tooltip("How many pedestrians stroll EACH footpath at once (both sides → ~2x this total).")]
-    public int maxWalkersPerSide = 10;
+    public int maxWalkersPerSide = 20;
     [Tooltip("Spawn no closer than this far ahead of the bus (m). Keep BEYOND the visible-ahead range so " +
              "walkers are already there when they come into view — never seen popping in.")]
     public float spawnMinAhead = 75f;
@@ -50,7 +51,33 @@ public class FootpathPedestrians : MonoBehaviour
     readonly Stack<Walker> _free = new Stack<Walker>();
     bool _ready;
 
-    void Awake() { _road = GetComponent<TiledRoadStreamer>(); _zone = GetComponent<RoadZone>(); }
+    void Awake() { Instance = this; _road = GetComponent<TiledRoadStreamer>(); _zone = GetComponent<RoadZone>(); }
+
+    /// Adopt a passenger that just ALIGHTED from the bus as a walking pedestrian on the player-side footpath,
+    /// at the bus's current position, strolling away. Reuses the same GameObject (no pool pop) so there's no
+    /// flicker. Returns false if we can't take it (no room / not ready).
+    public bool AdoptAsWalker(Passenger p)
+    {
+        if (!_ready || p == null) return false;
+        int side = +1;                                   // player-side footpath (where the door is)
+        if (CountSide(side) >= maxWalkersPerSide + 4) return false;   // a little headroom over the spawn cap
+
+        Walker w = _free.Count > 0 ? _free.Pop() : new Walker();
+        w.p = p;
+        w.side = side;
+        // place at the bus's current road position, on the footpath
+        float metresAtBus = 1.5f;                        // just ahead of the door
+        w.metres = metresAtBus;
+        w.lateral = FootpathLateral(side) + Random.Range(-lateralWander, lateralWander);
+        w.dir = +1;                                      // walk along with traffic, away from the bus
+        w.speed = Random.Range(walkSpeed.x, walkSpeed.y);
+
+        p.transform.SetParent(_parent, true);
+        p.BeginWalking(0, Color.grey);                   // a plain pedestrian again (already paid/rode)
+        if (_road.SampleRoad(w.metres, w.lateral, out Vector3 pos, out _, out _)) p.transform.position = pos;
+        _live.Add(w);
+        return true;
+    }
 
     void Start()
     {

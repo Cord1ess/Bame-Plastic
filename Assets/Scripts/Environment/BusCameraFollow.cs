@@ -136,4 +136,12 @@ public class BusCameraFollow : MonoBehaviour
         Quaternion yawRot = Quaternion.Euler(0f, _yaw, 0f);
         return target.position - yawRot * Vector3.forward * distance + Vector3.up * height;
     }
+
+    /// Where the chase camera wants to be RIGHT NOW (used by MenuMode to ease into the chase on play start).
+    public void GetChasePose(out Vector3 pos, out Quaternion rot)
+    {
+        if (target != null) _yaw = (_yawSource != null ? _yawSource : target).eulerAngles.y;
+        pos = target != null ? DesiredPosition() : transform.position;
+        rot = Quaternion.Euler(pitch, _yaw, 0f);
+    }
 }

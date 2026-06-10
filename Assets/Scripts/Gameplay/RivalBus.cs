@@ -10,20 +10,18 @@ public class RivalBus
 {
     public string name = "Rival";
 
-    [Tooltip("Baseline taka earned per second.")]
-    public float earnRate = 8f;
-
-    [Tooltip("How much the per-second earning randomly varies (0 = steady, 1 = very bursty).")]
-    [Range(0f, 1f)]
-    public float burstiness = 0.5f;
+    [Tooltip("Average seconds between this rival collecting a fare (it earns in 10/20/30/50 TIER jumps, never " +
+             "tiny fractions — matches the player's fare model).")]
+    public float fareInterval = 4f;
 
     // Runtime
-    [HideInInspector] public float earnings;
+    [HideInInspector] public int earnings;
+    float _nextFareIn = -1f;
     [Tooltip("When true, a physical rival bus (RivalBrain) drives this rival's earnings (real fares stolen at " +
              "stops) and the simulated Tick is skipped. Set by the brain when it links to this standings entry.")]
     [HideInInspector] public bool drivenByAgent;
 
-    public void ResetEarnings() { earnings = 0f; }
+    public void ResetEarnings() { earnings = 0; _nextFareIn = -1f; }
 
     /// A linked RivalBrain calls this when its bus grabs passengers at a stop — real, earned taka.
     public void AddEarnings(int taka) { earnings += Mathf.Max(0, taka); }
@@ -31,11 +29,15 @@ public class RivalBus
     public void Tick(float dt)
     {
         if (drivenByAgent) return;     // a real agent drives this rival's earnings; no simulation
-        // Random multiplier around 1.0 so each rival's total climbs unevenly (feels alive).
-        float jitter = 1f + Random.Range(-burstiness, burstiness);
-        earnings += earnRate * jitter * dt;
-        if (earnings < 0f) earnings = 0f;
+        if (_nextFareIn < 0f) _nextFareIn = Random.Range(fareInterval * 0.5f, fareInterval * 1.5f);
+        _nextFareIn -= dt;
+        if (_nextFareIn <= 0f)
+        {
+            // collect ONE fare = a random tier (10/20/30/50), so the leaderboard jumps cleanly like the player's.
+            earnings += Passenger.FareTiers[Random.Range(0, Passenger.FareTiers.Length)];
+            _nextFareIn = Random.Range(fareInterval * 0.5f, fareInterval * 1.5f);
+        }
     }
 
-    public int Taka => Mathf.RoundToInt(earnings);
+    public int Taka => earnings;
 }

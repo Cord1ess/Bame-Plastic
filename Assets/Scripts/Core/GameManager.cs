@@ -14,7 +14,7 @@ public class GameManager : MonoBehaviour
 {
     public static GameManager Instance { get; private set; }
 
-    public enum GameState { Boot, Playing, ShiftOver }
+    public enum GameState { Boot, Menu, Playing, ShiftOver }
 
     [Header("State")]
     [SerializeField] GameState _state = GameState.Boot;
@@ -37,9 +37,13 @@ public class GameManager : MonoBehaviour
 
     void Start()
     {
-        // Boot -> Playing once the scene is up. (Later: gate this behind an intro/loading screen.)
-        SetState(GameState.Playing);
+        // Boot -> MENU: the scene opens as a living main menu (parked bus, crew, traffic, menu UI on top).
+        // MenuMode drives this state; pressing Start/Solo transitions it to Playing (smooth, same scene).
+        SetState(GameState.Menu);
     }
+
+    /// Called by MenuMode when the player starts a shift — flips the world into gameplay.
+    public void EnterPlaying() => SetState(GameState.Playing);
 
     /// Find the child managers if not wired in the inspector. Children-first keeps it self-contained.
     public void ResolveManagers()

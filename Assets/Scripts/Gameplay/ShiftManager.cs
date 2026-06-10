@@ -16,6 +16,9 @@ public class ShiftManager : MonoBehaviour
     [Tooltip("Length of one shift (day->night) in seconds. 600 = 10 minutes. Lower it (e.g. 45) to test the end-of-shift summary quickly.")]
     public float shiftDuration = 600f;
     public string playerName = "You";
+    [Tooltip("Start the shift immediately on scene load, bypassing the living menu (testing shortcut). " +
+             "Leave OFF so the scene opens as the menu.")]
+    public bool autoStart = false;
 
     [Header("Bus health")]
     public float maxHealth = 100f;
@@ -62,6 +65,27 @@ public class ShiftManager : MonoBehaviour
 
     void Start()
     {
+        // Initialise idle — the shift does NOT auto-run. The scene opens in MENU mode (living backdrop); the
+        // clock/HUD/rivals only start when MenuMode calls BeginShift() on Start/Solo. autoStart lets you run
+        // the game scene directly (no menu) for testing.
+        TimeRemaining = shiftDuration;
+        Health = maxHealth;
+        Earnings = 0;
+        _earningsFloat = 0f;
+        IsRunning = false;
+        IsOver = false;
+
+        if (dayNight == null) dayNight = FindAnyObjectByType<DayNightController>();
+        // hold the sky at the opening sunrise during the menu
+        if (dayNight != null) { dayNight.externalTimeControl = true; dayNight.SetShiftProgress(0f); }
+
+        if (autoStart) BeginShift();   // testing shortcut: run the shift immediately, bypassing the menu
+    }
+
+    /// Begin the actual shift: start the clock, reset rivals, spawn the HUD. Called by MenuMode when the
+    /// player hits Start/Solo (the menu→play transition), or on Start if autoStart is on.
+    public void BeginShift()
+    {
         TimeRemaining = shiftDuration;
         Health = maxHealth;
         Earnings = 0;
@@ -71,21 +95,15 @@ public class ShiftManager : MonoBehaviour
 
         if (rivals == null || rivals.Count == 0) GenerateDefaultRivals();
         foreach (var r in rivals) r.ResetEarnings();
+        if (dayNight != null) { dayNight.externalTimeControl = true; dayNight.SetShiftProgress(0f); }
 
-        if (dayNight == null) dayNight = FindAnyObjectByType<DayNightController>();
-        if (dayNight != null)
-        {
-            dayNight.externalTimeControl = true;
-            dayNight.SetShiftProgress(0f);   // begin at sunrise
-        }
-
-        // One-component setup: spawn the HUD if the scene doesn't already have one.
         if (FindAnyObjectByType<ShiftHud>() == null)
         {
             GameObject hud = new GameObject("ShiftHUD");
             hud.AddComponent<ShiftHud>();
             SceneHierarchy.Parent(hud, SceneHierarchy.Category.UI);
         }
+        SpeedometerHud.Spawn();   // gameplay HUD — only now (never during the menu)
     }
 
     void Update()
@@ -183,10 +201,10 @@ public class ShiftManager : MonoBehaviour
     {
         rivals = new List<RivalBus>
         {
-            new RivalBus { name = "Raida",       earnRate = 8.5f, burstiness = 0.5f },
-            new RivalBus { name = "Boishakhi",   earnRate = 7.5f, burstiness = 0.6f },
-            new RivalBus { name = "Projapoti",   earnRate = 6.0f, burstiness = 0.4f },
-            new RivalBus { name = "Mirpur Link", earnRate = 9.0f, burstiness = 0.7f },
+            new RivalBus { name = "Raida",       fareInterval = 3.5f },
+            new RivalBus { name = "Boishakhi",   fareInterval = 4.0f },
+            new RivalBus { name = "Projapoti",   fareInterval = 5.0f },
+            new RivalBus { name = "Mirpur Link", fareInterval = 3.2f },
         };
     }
 }

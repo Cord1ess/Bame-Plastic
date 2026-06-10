@@ -11,6 +11,11 @@ public class DayNightController : MonoBehaviour
     [HideInInspector]
     public float timeMultiplier = 1f;
 
+    [Header("Sun brightness")]
+    [Tooltip("Directional sun intensity at full DAY (noon). Higher = sunnier. The day curve scales this " +
+             "0 (night) → this value (noon).")]
+    public float dayIntensity = 2.4f;
+
     [Header("Sun geometry (rises in FRONT of the bus)")]
     [Tooltip("Light azimuth (deg). The light shines ALONG its +Z. ~180 makes it shine back toward the bus " +
              "from AHEAD — so the sun disc sits in FRONT of the bus (you drive toward the sunrise). A small " +
@@ -21,12 +26,12 @@ public class DayNightController : MonoBehaviour
     public float sunNoonElevation = 62f;
 
     [Header("Shift schedule (phase fractions of the 0..1 shift)")]
-    [Tooltip("Fraction of the shift spent on SUNRISE at the very start (0.05 = first 5% ≈ 30s of a 10-min shift).")]
-    [Range(0f, 0.5f)] public float sunriseFraction = 0.05f;
-    [Tooltip("Fraction of the shift spent at DUSK before night.")]
-    [Range(0f, 0.5f)] public float duskFraction = 0.15f;
-    [Tooltip("Fraction of the shift that is NIGHT at the very end (0.15 = last 15% ≈ 1.5min).")]
-    [Range(0f, 0.5f)] public float nightFraction = 0.15f;
+    [Tooltip("Fraction of the shift spent ramping through SUNRISE at the start — keep small for a quick change.")]
+    [Range(0f, 0.5f)] public float sunriseFraction = 0.04f;
+    [Tooltip("Fraction spent in DUSK (noon→sunset) before night — small = quick.")]
+    [Range(0f, 0.5f)] public float duskFraction = 0.07f;
+    [Tooltip("Fraction that is NIGHT at the very end — small = quick. The big remainder is the NOON hold.")]
+    [Range(0f, 0.5f)] public float nightFraction = 0.06f;
 
     // When true, something else (ShiftManager) sets currentTimeOfDay each frame so the day->night
     // cycle tracks the shift clock (dusk == shift end). Leave false for the standalone auto-cycle.
@@ -38,27 +43,34 @@ public class DayNightController : MonoBehaviour
     public Gradient ambientColor;    // Ambient environment color (essential for dark night shadow shading!)
     public Gradient fogColors;       // Color of the atmospheric fog
 
-    [Header("Fog Settings")]
+    [Header("Smog (linear fog that hides distant objects)")]
     public bool controlFog = true;
-    public float maxFogDensity = 0.015f; // Deep atmospheric thickness at night/dawn
+    [Tooltip("Distance (m) where the smog STARTS — nearer than this is clear.")]
+    public float smogStart = 40f;
+    [Tooltip("Distance (m) where the smog FULLY hides objects — they smoothly fade out between start and end. " +
+             "Keep ≳ BuildingSpawner.spawnAhead so buildings fade in inside the smog (no pop-in).")]
+    public float smogEnd = 240f;
+    [Tooltip("Smog is a touch thicker at dawn/dusk/night: this scales how much START/END pull IN away from " +
+             "noon (0 = constant smog all day, 0.5 = noticeably hazier at the edges).")]
+    [Range(0f, 0.8f)] public float smogTimeVariation = 0.35f;
+    [Tooltip("Base smog tint (warm grey-brown haze). The time-of-day fogColors gradient tints on top of this.")]
+    public Color smogTint = new Color(0.62f, 0.6f, 0.55f, 1f);
 
-    float sunInitialIntensity;
+    [Header("Skybox blending (optional)")]
+    [Tooltip("Optional — auto-found. Crossfades cubemap skyboxes across the day in sync with this cycle.")]
+    public SkyboxBlender skybox;
 
     void Start()
     {
-        if (sun != null)
-        {
-            sunInitialIntensity = sun.intensity;
-        }
-
         // Flat ambient so our per-frame ambientLight tint actually applies (Skybox/Gradient modes ignore it).
         RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
 
-        // Force enable fog and setup exponential decay for premium graphics
+        // LINEAR fog = smog: objects fade smoothly to nothing between smogStart and smogEnd (distance-based,
+        // reads like polluted haze hiding the distance — not the old time-density exponential fog).
         if (controlFog)
         {
             RenderSettings.fog = true;
-            RenderSettings.fogMode = FogMode.ExponentialSquared;
+            RenderSettings.fogMode = FogMode.Linear;
         }
     }
 
@@ -78,25 +90,33 @@ public class DayNightController : MonoBehaviour
             }
         }
 
-        // 1. Dynamic Fog Color
-        if (fogColors != null)
-        {
-            RenderSettings.fogColor = fogColors.Evaluate(currentTimeOfDay);
-        }
-
         // 2. Dynamic Ambient Environment Color (This makes the night pitch dark!)
         if (ambientColor != null)
         {
             RenderSettings.ambientLight = ambientColor.Evaluate(currentTimeOfDay);
         }
 
-        // 3. Dynamic Fog Density: LIGHT at midday (clear sunny day), thicker toward dawn/dusk/night. Distance
-        //    from noon (0.5) drives it — 0 at noon → 1 at midnight.
+        // 1+3. SMOG: linear distance fog that smoothly hides the distance. Always present (polluted haze);
+        //       a bit thicker (start/end pulled IN) toward dawn/dusk/night. Colour = warm smog tint, tinted
+        //       by the time-of-day gradient so the haze warms at sunset / goes dim at night.
         if (controlFog)
         {
             float fromNoon = Mathf.Clamp01(Mathf.Abs(currentTimeOfDay - 0.5f) / 0.5f);   // 0 noon .. 1 night
-            RenderSettings.fogDensity = Mathf.Lerp(maxFogDensity * 0.25f, maxFogDensity, fromNoon * fromNoon);
+            float thicken = 1f - smogTimeVariation * fromNoon;                            // 1 at noon, less at edges
+            RenderSettings.fogStartDistance = smogStart * thicken;
+            RenderSettings.fogEndDistance = Mathf.Max(smogStart * thicken + 5f, smogEnd * thicken);
+
+            // smog colour: the warm haze tint, darkened toward night (so the smog dims, not stays bright at
+            // night) and nudged toward the time gradient for sunset warmth.
+            Color c = smogTint;
+            if (fogColors != null) c = Color.Lerp(c, fogColors.Evaluate(currentTimeOfDay), 0.45f);
+            float nightDim = Mathf.Lerp(1f, 0.3f, fromNoon * fromNoon);   // bright by day, dim at night
+            RenderSettings.fogColor = new Color(c.r * nightDim, c.g * nightDim, c.b * nightDim, 1f);
         }
+
+        // 4. Skybox crossfade, in sync with the cycle (rotated so its baked sun ~aligns with our directional sun).
+        if (skybox == null) skybox = FindAnyObjectByType<SkyboxBlender>();
+        if (skybox != null) skybox.Apply(currentTimeOfDay, sunAzimuth);
     }
 
     // Called by ShiftManager when it owns the clock (externalTimeControl = true).
@@ -105,27 +125,27 @@ public class DayNightController : MonoBehaviour
         currentTimeOfDay = Mathf.Clamp01(t);
     }
 
-    /// Drive the cycle from SHIFT PROGRESS (0 = start .. 1 = end) through the phase schedule, so the visual
-    /// time-of-day isn't a flat lerp: a quick sunrise, a long sunny day, then dusk into a short night.
-    /// Maps progress → canonical timeOfDay (0.25 sunrise, 0.5 noon, 0.75 dusk, ~0.97 deep night).
+    /// Drive the cycle from SHIFT PROGRESS (0 = start .. 1 = end). Tuned so transitions are QUICK and NOON
+    /// is held the LONGEST: a fast sunrise ramps straight to noon, the day phase PINS time-of-day at noon
+    /// (0.5) for its whole (large) duration, then a fast sunset→dusk→night at the very end.
     public void SetShiftProgress(float p)
     {
         p = Mathf.Clamp01(p);
         float rise = Mathf.Clamp01(sunriseFraction);
         float night = Mathf.Clamp01(nightFraction);
         float dusk = Mathf.Clamp01(duskFraction);
-        float duskStart = Mathf.Max(rise, 1f - night - dusk);   // day runs [rise .. duskStart]
-        float nightStart = 1f - night;                           // [duskStart .. nightStart] is dusk
+        float duskStart = Mathf.Max(rise, 1f - night - dusk);   // DAY = [rise .. duskStart] (the long noon hold)
+        float nightStart = 1f - night;
 
         float tod;
-        if (p < rise)                       // SUNRISE: 0.18 (pre-dawn) → 0.30 (full morning)
-            tod = Mathf.Lerp(0.18f, 0.30f, p / Mathf.Max(0.0001f, rise));
-        else if (p < duskStart)             // DAY: 0.30 → 0.62, sun swings through noon (0.5)
-            tod = Mathf.Lerp(0.30f, 0.62f, Mathf.InverseLerp(rise, duskStart, p));
-        else if (p < nightStart)            // DUSK: 0.62 → 0.80 (sunset)
-            tod = Mathf.Lerp(0.62f, 0.80f, Mathf.InverseLerp(duskStart, nightStart, p));
-        else                                // NIGHT: 0.80 → 0.97 (deep night)
-            tod = Mathf.Lerp(0.80f, 0.97f, Mathf.InverseLerp(nightStart, 1f, p));
+        if (p < rise)                       // SUNRISE → noon, quick: 0.22 → 0.50
+            tod = Mathf.Lerp(0.22f, 0.50f, Mathf.SmoothStep(0f, 1f, p / Mathf.Max(0.0001f, rise)));
+        else if (p < duskStart)             // DAY: HOLD at noon (0.5) the entire time — the longest phase
+            tod = 0.5f;
+        else if (p < nightStart)            // DUSK: noon → sunset, quick: 0.50 → 0.78
+            tod = Mathf.Lerp(0.50f, 0.78f, Mathf.SmoothStep(0f, 1f, Mathf.InverseLerp(duskStart, nightStart, p)));
+        else                                // NIGHT: 0.78 → 0.97, quick
+            tod = Mathf.Lerp(0.78f, 0.97f, Mathf.InverseLerp(nightStart, 1f, p));
 
         currentTimeOfDay = tod;
     }
@@ -133,12 +153,6 @@ public class DayNightController : MonoBehaviour
     void UpdateSun()
     {
         if (sun == null) return;
-
-        // Lazy initialize the sun's base intensity if we are in Edit Mode
-        if (sunInitialIntensity == 0)
-        {
-            sunInitialIntensity = sun.intensity > 0 ? sun.intensity : 1f;
-        }
 
         // SUN ARC, rising in FRONT of the bus. dayPhase: 0 at sunrise (0.25) → 1 at sunset (0.75); the sun's
         // ELEVATION follows a sine so it's on the horizon at dawn/dusk and highest at noon. The AZIMUTH is
@@ -161,7 +175,7 @@ public class DayNightController : MonoBehaviour
         else if (currentTimeOfDay < 0.82f) intensityMultiplier = 1f - Mathf.InverseLerp(0.70f, 0.82f, currentTimeOfDay); // dusk fade
         else intensityMultiplier = 0f;                                                              // night
 
-        sun.intensity = sunInitialIntensity * intensityMultiplier;
+        sun.intensity = dayIntensity * intensityMultiplier;
 
         // 4. Dynamic Sun Tinting
         if (sunColor != null)

@@ -381,6 +381,27 @@ public class BusController : MonoBehaviour
         Impacted?.Invoke(severity);
     }
 
+    /// Physically KNOCK the bus back — used when it rams a SOLID obstacle (a rival bus) so it bounces off
+    /// instead of passing through. Pushes the physics sphere in `worldDir` (away from the obstacle) and bleeds
+    /// the speed driving into it. `force` is the bounce-back speed (m/s).
+    public void Knockback(Vector3 worldDir, float force)
+    {
+        worldDir.y = 0f;
+        if (worldDir.sqrMagnitude < 1e-5f) return;
+        worldDir.Normalize();
+        if (sphere != null)
+        {
+            Vector3 v = sphere.linearVelocity;
+            float into = Vector3.Dot(v, -worldDir);        // how fast we're driving INTO the obstacle
+            if (into > 0f) v += worldDir * into;           // cancel that component
+            v += worldDir * force;                          // then bounce away
+            sphere.linearVelocity = new Vector3(v.x, sphere.linearVelocity.y, v.z);
+        }
+        currentSpeed *= 0.2f;                               // lose most drive speed on a hard hit
+        drifting = false;
+        Impacted?.Invoke(0.8f);
+    }
+
     // PROGRESSIVE gear ratios: speed band widths grow geometrically across the gears (1st is short and revs
     // out quickly; top gear is tall and spans the most speed) — like a real gearbox, not even slices. The
     // cumulative band edge for gear g (0-based) as a fraction of maxSpeed, scaled so the last edge = maxSpeed.

@@ -47,7 +47,7 @@ public class RivalBrain : MonoBehaviour, TrafficVehicle.IVehicleBrain
         var sm = ShiftManager.Instance;
         if (sm == null) return;
         _standing = sm.rivals.Find(r => r.name == rivalName);
-        if (_standing == null) { _standing = new RivalBus { name = rivalName, earnRate = 0f }; sm.rivals.Add(_standing); }
+        if (_standing == null) { _standing = new RivalBus { name = rivalName, fareInterval = 4f }; sm.rivals.Add(_standing); }
         _standing.drivenByAgent = true;
     }
 

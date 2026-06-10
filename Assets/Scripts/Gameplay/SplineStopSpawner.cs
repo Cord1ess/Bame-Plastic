@@ -195,13 +195,15 @@ public class SplineStopSpawner : MonoBehaviour
                         st.crowd[c].BeginGather(CurbPoint(st, g++));
             }
 
-            // Phase 2 — bus pulled up slow & close: the curb crowd boards.
+            // Phase 2 — bus pulled up slow & close: the curb crowd boards, AND any rider who rang the bell
+            // (wants off) alights here and walks away on the footpath.
             if (st.gathered && !st.boardingDone && bus.CanBoard && dSqr <= boardRange * boardRange)
             {
                 st.boardingDone = true;
                 for (int c = 0; c < st.crowd.Count; c++)
                     if (st.crowd[c] != null && st.crowd[c].state == Passenger.State.Gathering)
                         st.crowd[c].BeginBoarding(bus);
+                bus.ReleaseAlightersAtStop();   // people who want off step off here
             }
 
             // Recycle once the bus is well past this stop.

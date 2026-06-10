@@ -11,6 +11,8 @@ public class BusAudio : MonoBehaviour
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     static void Bootstrap()
     {
+        // gameplay only — don't spawn the bus audio in the menu scene
+        if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name != SceneFlow.Game) return;
         if (FindAnyObjectByType<BusAudio>() == null)
         {
             var go = new GameObject("BusAudio");

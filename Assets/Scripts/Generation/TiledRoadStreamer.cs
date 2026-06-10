@@ -216,6 +216,9 @@ public class TiledRoadStreamer : MonoBehaviour
         }
         var go = new GameObject("Tiles");
         go.transform.SetParent(transform, false);
+        // never serialize generated tiles into the scene (edit-mode preview was baking 150+ RoadTiles into
+        // the .unity file, bloating it). They're regenerated every load.
+        go.hideFlags = HideFlags.DontSaveInEditor | HideFlags.DontSaveInBuild;
         _tilesParent = go.transform;
     }
 
@@ -278,6 +281,11 @@ public class TiledRoadStreamer : MonoBehaviour
         // pre-placed bus must match what gets built at runtime). seed>0 pins it; seed==0 uses a stable
         // auto-seed saved on this object (generated once, random-looking but persistent).
         int effective = seed != 0 ? seed : (_autoSeed != 0 ? _autoSeed : (_autoSeed = MakeAutoSeed()));
+        // In PLAY mode, the session (menu/lobby) seed wins so all clients build the SAME world (the MP
+        // promise) and solo uses its fresh seed. Edit-mode preview keeps the persisted seed so the
+        // pre-placed bus still matches.
+        if (Application.isPlaying && SessionContext.Instance != null && SessionContext.Instance.Seed != 0)
+            effective = SessionContext.Instance.Seed;
         Random.InitState(effective);
         _rng = Random.state;
         _haveCarry = false;                       // fresh build: no boundary carry-over yet
@@ -542,6 +550,7 @@ public class TiledRoadStreamer : MonoBehaviour
         EnsureParent();
         var go = new GameObject("RoadTile");
         go.transform.SetParent(_tilesParent, false);
+        go.hideFlags = HideFlags.DontSaveInEditor | HideFlags.DontSaveInBuild;   // never bake into the scene
         return go.AddComponent<RoadTile>();
     }
 
@@ -597,8 +606,9 @@ public class TiledRoadStreamer : MonoBehaviour
         Vector3 center = CenterlineAt(tileF);
 
         // forward = the travel direction (toward lower metresFromBus = toward the FRONT = lower tileF).
-        // Sample a hair behind (higher tileF) and use (here - behind) so fwd points the way traffic drives.
-        float eps = 0.05f;
+        // Use a WIDER baseline (~half a tile) so the tangent is smooth through curves — a tiny eps picks up
+        // piecewise-linear kinks and makes vehicles/peds jitter their heading on turns.
+        float eps = 0.4f;
         float tB = Mathf.Min(_live.Count - 1, tileF + eps);
         float tF = Mathf.Max(0f, tileF - eps);
         Vector3 ahead = CenterlineAt(tF);
@@ -607,7 +617,18 @@ public class TiledRoadStreamer : MonoBehaviour
         fwd = d.sqrMagnitude < 1e-8f ? Vector3.forward : d.normalized;
         right = Vector3.Cross(Vector3.up, fwd).normalized;
 
-        pos = center + right * lateral;
+        // OFFSET, curvature-corrected: a naive center+right*lateral overshoots on the INSIDE of a bend (the
+        // offset point can cross the centreline on tight turns → peds/vehicles end up on the road). Sample the
+        // centreline a little ahead+behind and average their offsets so the point hugs the curve instead.
+        if (Mathf.Abs(lateral) > 0.01f)
+        {
+            Vector3 rA = Perp(tF), rB = Perp(tB);
+            Vector3 pA = ahead + rA * lateral;
+            Vector3 pB = behind + rB * lateral;
+            Vector3 pC = center + right * lateral;
+            pos = (pA + pB + pC * 2f) * 0.25f;     // weighted toward the exact point, smoothed by neighbours
+        }
+        else pos = center;
         return true;
     }
 
@@ -621,6 +642,17 @@ public class TiledRoadStreamer : MonoBehaviour
         float t = tileF - i;
         TileSpan s = _live[i];
         return Vector3.Lerp(s.endPt, s.startPt, t);
+    }
+
+    // road-right (perpendicular) at a fractional tile index, from the local tangent.
+    Vector3 Perp(float tileF)
+    {
+        float e = 0.2f;
+        Vector3 a = CenterlineAt(Mathf.Max(0f, tileF - e));
+        Vector3 b = CenterlineAt(Mathf.Min(_live.Count - 1, tileF + e));
+        Vector3 d = a - b; d.y = 0f;
+        Vector3 f = d.sqrMagnitude < 1e-8f ? Vector3.forward : d.normalized;
+        return Vector3.Cross(Vector3.up, f).normalized;
     }
 
     // --- spawn ---

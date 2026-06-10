@@ -6,15 +6,14 @@ using UnityEngine.UI;
 /// Auto-spawns; reads BusController.Instance. No scene setup.
 public class SpeedometerHud : MonoBehaviour
 {
-    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
-    static void Bootstrap()
+    /// Spawn the speedometer. Called by ShiftManager.BeginShift() when GAMEPLAY actually starts — so it never
+    /// appears during the living menu. (No auto-spawn: that fired in the menu too.)
+    public static void Spawn()
     {
-        if (FindAnyObjectByType<SpeedometerHud>() == null)
-        {
-            var go = new GameObject("SpeedometerHud");
-            go.AddComponent<SpeedometerHud>();
-            SceneHierarchy.Parent(go, SceneHierarchy.Category.UI);
-        }
+        if (FindAnyObjectByType<SpeedometerHud>() != null) return;
+        var go = new GameObject("SpeedometerHud");
+        go.AddComponent<SpeedometerHud>();
+        SceneHierarchy.Parent(go, SceneHierarchy.Category.UI);
     }
 
     BusController _bus;
