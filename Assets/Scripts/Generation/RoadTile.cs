@@ -23,6 +23,7 @@ public class RoadTile : MonoBehaviour
 
     public bool InUse { get; private set; }
     public int Generation { get; private set; }   // bumped each reuse, so late bakes from a prior life are ignored
+    public MeshRenderer Renderer { get { EnsureRefs(); return _mr; } }   // for per-tile MaterialPropertyBlock overrides
 
     void EnsureRefs()
     {

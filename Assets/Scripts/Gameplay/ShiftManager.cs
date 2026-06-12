@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using BamePlastic.Net;
 
 /// The shift = the run. Owns the day->night clock, YOUR earnings + bus health, and the rival
 /// company-bus leaderboard. This is the single source of truth the HUD reads and (later) the
@@ -159,10 +160,48 @@ public class ShiftManager : MonoBehaviour
     public void Damage(float amount) => Health = Mathf.Clamp(Health - amount, 0f, maxHealth);
     public void Repair(float amount) => Health = Mathf.Clamp(Health + amount, 0f, maxHealth);
 
+    /// MULTIPLAYER (conductor clients): the DRIVER is authoritative for earnings/health; this overwrites the
+    /// local HUD numbers with the driver's truth (sent low-rate via GameNet EarningsSync).
+    public void SetFromNetwork(int earnings, int health)
+    {
+        Earnings = earnings; _earningsFloat = earnings;
+        Health = Mathf.Clamp(health, 0f, maxHealth);
+    }
+
     void EndShift()
     {
         IsRunning = false;
         IsOver = true;
+        ReportResult();
+    }
+
+    bool _reported;
+    /// At shift end: award the run's earnings to the logged-in account (career taka + Bhara) and post the result
+    /// to the leaderboard. In MULTIPLAYER only the DRIVER reports the shared bus earnings (avoids triple-count);
+    /// each player still awards to their OWN account via the driver-confirmed earnings shown on their HUD.
+    void ReportResult()
+    {
+        if (_reported) return;
+        _reported = true;
+
+        var gn = BamePlastic.Net.GameNet.Instance;
+        bool mpNonDriver = gn != null && gn.Active && !gn.IsDriver;
+
+        // every human credits their own wallet with the run's earnings (Bhara conversion happens server-side)
+        if (PlayerAccount.LoggedIn && Earnings > 0)
+            PlayerAccount.AwardEarnings(Earnings);
+
+        // leaderboard post — driver (or solo) only, so a co-op shift logs one shared result
+        if (!mpNonDriver) PostLeaderboard();
+    }
+
+    void PostLeaderboard()
+    {
+        int elapsed = Mathf.RoundToInt(Mathf.Max(0f, shiftDuration - TimeRemaining));
+        string room = SessionContext.Instance != null && SessionContext.Instance.Room != null
+                      ? SessionContext.Instance.Room.code : "";
+        // best-effort fire-and-forget POST to the leaderboard.
+        BamePlastic.Net.LeaderboardApi.PostResult(playerName, Earnings, Mathf.RoundToInt(Health), elapsed, room);
     }
 
     void RestartShift()

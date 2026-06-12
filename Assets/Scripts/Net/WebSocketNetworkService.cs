@@ -12,7 +12,7 @@ namespace BamePlastic.Net
     ///
     /// Connection is lazy: the first CreateRoom/JoinRoom/RefreshRoomList opens the socket, queues the intent,
     /// and sends it once connected. Tick(dt) pumps the message queue (required by NativeWebSocket, esp. WebGL).
-    public class WebSocketNetworkService : INetworkService
+    public class WebSocketNetworkService : INetworkService, IGameNet
     {
         readonly string _url;                  // ws://host:8080/ws/session
         WebSocket _ws;
@@ -28,6 +28,7 @@ namespace BamePlastic.Net
         public event Action<string> JoinFailed;
         public event Action<RoomListing[]> RoomListUpdated;
         public event Action<int> ShiftStarting;
+        public event Action<RoleReassign> RoleReassigned;
 
         public WebSocketNetworkService(string url) { _url = url; }
 
@@ -59,6 +60,21 @@ namespace BamePlastic.Net
             catch (Exception ex) { Debug.LogWarning($"[Net] send failed: {ex.Message}"); }
         }
 
+        // ---------------- IGameNet: binary game hot-path ----------------
+        public event Action<byte[]> OnBinary;
+
+        public void SendBinary(byte[] frame)
+        {
+            if (frame == null || frame.Length == 0) return;
+            if (_ws != null && _ws.State == WebSocketState.Open) RawSendBinary(frame);
+            // if not connected yet, drop it — game frames are per-tick + only sent in-game (socket is open by then)
+        }
+        async void RawSendBinary(byte[] frame)
+        {
+            try { if (_ws != null) await _ws.Send(frame); }
+            catch (Exception ex) { Debug.LogWarning($"[Net] binary send failed: {ex.Message}"); }
+        }
+
         // ---------------- INetworkService: lobby ----------------
         public void CreateRoom()      => Send(Msg($"{{\"t\":\"create\",\"name\":{Q(LocalPlayerName)}}}"));
         public void RefreshRoomList() => Send("{\"t\":\"list\"}");
@@ -83,9 +99,10 @@ namespace BamePlastic.Net
         // ---------------- incoming ----------------
         void OnMessage(byte[] bytes)
         {
-            // lobby control is JSON text; the game hot-path (later) is binary — first byte < 0x20 wouldn't be '{'.
+            // lobby control is JSON text (starts with '{'); the game hot-path is BINARY (first byte = a small
+            // msg id < 0x20, never '{'). Route binary frames to the game-net layer.
             if (bytes == null || bytes.Length == 0) return;
-            if (bytes[0] != (byte)'{') { /* binary game frame — handled by the game net layer later */ return; }
+            if (bytes[0] != (byte)'{') { OnBinary?.Invoke(bytes); return; }
 
             string s = System.Text.Encoding.UTF8.GetString(bytes);
             var msg = JsonUtility.FromJson<SrvMsg>(s);
@@ -108,6 +125,9 @@ namespace BamePlastic.Net
                     break;
                 case "start":
                     ShiftStarting?.Invoke(msg.seed);
+                    break;
+                case "reassign":
+                    RoleReassigned?.Invoke(new RoleReassign { newDriverName = msg.newDriver, promotedFromRole = msg.promotedFrom });
                     break;
                 case "error":
                     JoinFailed?.Invoke(string.IsNullOrEmpty(msg.reason) ? "Error" : msg.reason);
@@ -155,6 +175,8 @@ namespace BamePlastic.Net
             public int seed;
             public int yourRole = -1;
             public string reason;
+            public string newDriver;        // "reassign" event
+            public int promotedFrom = -1;   // "reassign" event
             public SrvSlot[] slots;
             public SrvRoomRow[] rooms;
         }

@@ -35,9 +35,21 @@ public class BusController : MonoBehaviour
     public bool controlEnabled = true;
     public bool drifting;
 
+    /// Shared pause flag (set by PauseManager). When true the driver ignores throttle/steer and coasts to a stop;
+    /// MP-safe because it's just suppressed input (no Time.timeScale freeze that would also stall the network).
+    public static bool GamePaused;
+
     [Header("Drive — heavy pickup, strong brakes")]
     public float maxSpeed = 22f;
     public float maxReverseSpeed = 6f;
+
+    [Header("Conductor-1 speed gate")]
+    [Tooltip("While the outside conductor is OFF the bus, top speed is capped to this (km/h) so the road can't " +
+             "leave him behind. Full speed returns when he boards.")]
+    public float boardingSpeedCapKmh = 10f;
+    [Tooltip("Is the outside conductor (C1) aboard? Set by RoleController (solo) or GameNet/driver (multiplayer). " +
+             "When false the bus crawls at boardingSpeedCapKmh.")]
+    public bool conductor1Aboard = true;
     [Tooltip("How fast speed builds. Lower = heavier.")]
     public float accelRate = 16f;
     [Tooltip("Braking deceleration. High = sharp stops for dodging.")]
@@ -210,13 +222,35 @@ public class BusController : MonoBehaviour
     }
 
 
+    // ---- multiplayer PROXY mode: on conductor clients the bus is NOT simulated locally; it's driven from the
+    //      driver's interpolated BusState. In proxy mode Update() skips all physics/driving and just holds the
+    //      pose GameNet sets each frame via ProxySetPose. ----
+    public bool ProxyMode { get; private set; }
+    public void SetProxyMode(bool on)
+    {
+        ProxyMode = on;
+        controlEnabled = controlEnabled && !on;
+        if (on && sphere != null) { sphere.linearVelocity = Vector3.zero; sphere.angularVelocity = Vector3.zero; }
+    }
+    /// Apply a remote pose to the proxy bus (position is the ground point; yaw degrees). No physics.
+    public void ProxySetPose(Vector3 groundPos, float yawDeg, float speedMps)
+    {
+        _yaw = yawDeg;
+        currentSpeed = speedMps;
+        transform.SetPositionAndRotation(groundPos, Quaternion.Euler(0f, yawDeg, 0f));
+        if (sphere != null) sphere.transform.position = groundPos + Vector3.up * _sphereRadius;
+    }
+
     void Update()
     {
+        if (ProxyMode) return;   // proxy bus: pose comes from GameNet (driver's interpolated state), not physics
+
         // Follow the sphere's INTERPOLATED position (smooth — no per-frame jitter).
         transform.position = sphere.transform.position - Vector3.up * _sphereRadius;
 
         GameInput gi = GameInput.Instance;
-        float rawSteer = controlEnabled ? gi.steer.ReadValue<float>() : 0f;
+        bool canDrive = controlEnabled && !GamePaused;   // paused → no input, bus brakes to a halt below
+        float rawSteer = canDrive ? gi.steer.ReadValue<float>() : 0f;
         // DriverGuide adds a gentle pull toward the guide line (set each frame, consumed here).
         float steerTarget = Mathf.Clamp(rawSteer + _steerAssist, -1f, 1f);
         _steerAssist = 0f;
@@ -235,13 +269,17 @@ public class BusController : MonoBehaviour
         else _steerHold = 0f;
         _steerHoldSign = steerSign;
 
-        bool accel = controlEnabled && gi.accelerate.IsPressed();
-        bool brake = controlEnabled && gi.brake.IsPressed();
-        bool driftDown = controlEnabled && gi.drift.WasPressedThisFrame();
-        bool driftUp = controlEnabled && gi.drift.WasReleasedThisFrame();
+        bool accel = canDrive && gi.accelerate.IsPressed();
+        bool brake = (canDrive && gi.brake.IsPressed()) || GamePaused;   // paused → hold the brake (coast to stop)
+        bool driftDown = canDrive && gi.drift.WasPressedThisFrame();
+        bool driftUp = canDrive && gi.drift.WasReleasedThisFrame();
 
         float dt = Time.deltaTime;
         float topSpeed = maxSpeed * HealthFactor() * (drifting ? driftBoost : 1f);   // Space gives a small surge
+        // SPEED GATE: while the outside conductor (C1) is OFF the bus, crawl at <= boardingSpeedCapKmh so the
+        // procedural road can't leave him behind. Lifts the moment he boards. (conductor1Aboard is set by
+        // RoleController in solo, or by GameNet/driver-authority in multiplayer.)
+        if (!conductor1Aboard) topSpeed = Mathf.Min(topSpeed, boardingSpeedCapKmh / 3.6f);
 
         // --- Gearbox (also feeds the speedometer). PROGRESSIVE ratios like a real box: 1st covers a small
         //     speed band and revs out fast; each higher gear is taller (wider band) and pulls softer. The
@@ -382,9 +420,13 @@ public class BusController : MonoBehaviour
     }
 
     /// Physically KNOCK the bus back — used when it rams a SOLID obstacle (a rival bus) so it bounces off
-    /// instead of passing through. Pushes the physics sphere in `worldDir` (away from the obstacle) and bleeds
-    /// the speed driving into it. `force` is the bounce-back speed (m/s).
-    public void Knockback(Vector3 worldDir, float force)
+    /// instead of passing through. Pushes the physics sphere in `worldDir` (away from the obstacle). `force` is
+    /// the bounce-back speed (m/s). `hard` = a real impact (kills drive speed + fires the camera shake once);
+    /// the continuous frame-by-frame PRESS while leaning on a rival passes hard=false → it keeps shoving the bus
+    /// without zeroing its speed every frame (feels like leaning on a real bus, not glued to a wall) and DOESN'T
+    /// spam the camera shake.
+    public void Knockback(Vector3 worldDir, float force) => Knockback(worldDir, force, true);
+    public void Knockback(Vector3 worldDir, float force, bool hard)
     {
         worldDir.y = 0f;
         if (worldDir.sqrMagnitude < 1e-5f) return;
@@ -397,9 +439,9 @@ public class BusController : MonoBehaviour
             v += worldDir * force;                          // then bounce away
             sphere.linearVelocity = new Vector3(v.x, sphere.linearVelocity.y, v.z);
         }
-        currentSpeed *= 0.2f;                               // lose most drive speed on a hard hit
+        currentSpeed *= hard ? 0.2f : 0.86f;               // hard hit kills drive speed; a press just bleeds it
         drifting = false;
-        Impacted?.Invoke(0.8f);
+        if (hard) Impacted?.Invoke(0.8f);                  // shake ONCE on a real impact, not every press frame
     }
 
     // PROGRESSIVE gear ratios: speed band widths grow geometrically across the gears (1st is short and revs

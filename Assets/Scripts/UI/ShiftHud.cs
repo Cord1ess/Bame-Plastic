@@ -1,6 +1,7 @@
 using System.Text;
 using UnityEngine;
 using UnityEngine.UI;
+using BamePlastic.Net;
 
 /// The competitive-shift HUD, rebuilt in the PIXEL theme (PixelUI toolkit) — bordered panels, the pixel
 /// font, chunky bars, accent colours. All code-built (no manual Canvas):
@@ -23,23 +24,34 @@ public class ShiftHud : MonoBehaviour
 
     void Start() { BuildUI(); }
 
+    int _lastEarnings = int.MinValue, _lastTimer = int.MinValue, _lastHealth = int.MinValue;
+    float _standingsTimer;
+
     void Update()
     {
         ShiftManager sm = ShiftManager.Instance;
         if (sm == null) return;
 
-        _takaText.text = "Tk " + sm.Earnings.ToString("N0");
+        // rebuild each text only when its DISPLAYED value changes (no per-frame string alloc → no WebGL GC churn)
+        if (sm.Earnings != _lastEarnings) { _takaText.text = "Tk " + sm.Earnings.ToString("N0"); _lastEarnings = sm.Earnings; }
 
         int t = Mathf.CeilToInt(sm.TimeRemaining);
-        _timerText.text = string.Format("{0:0}:{1:00}", t / 60, t % 60);
-        _timerText.color = t <= 60 ? PixelUI.Red : PixelUI.Text;     // last minute → red
+        if (t != _lastTimer)
+        {
+            _timerText.text = (t / 60) + ":" + (t % 60).ToString("00");
+            _timerText.color = t <= 60 ? PixelUI.Red : PixelUI.Text;     // last minute → red
+            _lastTimer = t;
+        }
 
         float hp01 = sm.maxHealth > 0f ? Mathf.Clamp01(sm.Health / sm.maxHealth) : 0f;
         _healthFillRT.sizeDelta = new Vector2(_healthInner * hp01, _healthFillRT.sizeDelta.y);
         _healthFill.color = Color.Lerp(PixelUI.Red, PixelUI.Green, hp01);
-        _healthText.text = "BUS " + Mathf.RoundToInt(sm.Health) + "%";
+        int hp = Mathf.RoundToInt(sm.Health);
+        if (hp != _lastHealth) { _healthText.text = "BUS " + hp + "%"; _lastHealth = hp; }
 
-        _standingsText.text = BuildStandings(sm);
+        // standings: a sort + string build — throttle to ~4Hz (it barely changes within a frame)
+        _standingsTimer -= Time.deltaTime;
+        if (_standingsTimer <= 0f) { _standingsText.text = BuildStandings(sm); _standingsTimer = 0.25f; }
 
         if (sm.IsOver && !_summaryPanel.activeSelf) ShowSummary(sm);
     }
@@ -73,6 +85,14 @@ public class ShiftHud : MonoBehaviour
         _sb.AppendLine();
         _sb.Append("You placed <color=#FFC44D>").Append(place).Append("</color> of ").Append(count).AppendLine();
         _sb.Append("Earnings  <color=#FFC44D>Tk ").Append(sm.Earnings.ToString("N0")).Append("</color>").AppendLine();
+        // account reward (Bhara is granted at shift end via PlayerAccount.AwardEarnings; 100 tk = 10 Bhara)
+        if (PlayerAccount.LoggedIn)
+        {
+            int bharaEarned = (Mathf.Max(0, sm.Earnings) / 100) * 10;
+            _sb.Append("Bhara  <color=#6CD57E>+").Append(bharaEarned).Append("</color>   (wallet ")
+               .Append(PlayerAccount.Bhara).Append(")").AppendLine();
+            _sb.Append("<color=#8A839C>Career  Tk ").Append(PlayerAccount.TotalEarnings.ToString("N0")).Append("</color>").AppendLine();
+        }
         _sb.AppendLine();
         _sb.Append("<color=#8A839C>-- FINAL STANDINGS --</color>").AppendLine();
         _sb.Append(BuildStandings(sm));

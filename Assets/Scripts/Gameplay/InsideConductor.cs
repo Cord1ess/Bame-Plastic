@@ -17,10 +17,10 @@ public class InsideConductor : MonoBehaviour
 
     BillboardCharacter _view;
     bool _controlled;
+    bool _ai;                          // SOLO: auto-walk + auto-collect when unmanned
     Vector3 _center, _half;
 
     Passenger _target;                 // the currently-outlined rider
-    Transform _marker;                 // selection outline (a glowing quad above the target)
     float _flashUntil;
 
     GameObject _ui;
@@ -34,23 +34,38 @@ public class InsideConductor : MonoBehaviour
         transform.SetParent(cabin, false);
         transform.localPosition = _center;
         if (_view != null) _view.ApplyHeight();
-        BuildMarker();
         BuildUI();
+    }
+
+    void ClearSelection()
+    {
+        if (_selected != null) { _selected.SetSelected(false); _selected = null; }
+        _target = null;
     }
 
     public void SetControlled(bool on)
     {
         _controlled = on;
+        if (on) _ai = false;           // human took over
         if (!on)
         {
-            _target = null;
-            if (_marker != null) _marker.gameObject.SetActive(false);
+            ClearSelection();
             if (_ui != null) _ui.SetActive(false);
         }
     }
 
+    /// SOLO: enable/disable the auto-inside-conductor (walks the aisle, collects fares automatically).
+    public void SetAI(bool on)
+    {
+        if (_controlled) { _ai = false; return; }
+        _ai = on;
+        if (!on) ClearSelection();
+    }
+
     void Update()
     {
+        if (BusController.GamePaused) return;          // shared pause freezes him too
+        if (_ai && !_controlled) { AiTick(); return; }
         if (!_controlled) return;
 
         // --- walk the aisle box, slowing past standing riders ---
@@ -71,9 +86,15 @@ public class InsideConductor : MonoBehaviour
         // --- snappy selection: always outline the nearest collectable rider in reach ---
         UpdateTarget(bp);
 
-        // --- one press = collect their owed fare ---
+        // --- one press = collect their owed fare (with a cooldown so he can't spam — he takes his time) ---
         if (GameInput.Instance.action.WasPressedThisFrame() && _target != null)
-            Collect(_target);
+        {
+            if (Time.time >= _collectReadyAt) Collect(_target);
+            else Flash("…counting change");        // too soon — feedback that he's still busy
+        }
+
+        // --- COMBO decay: the streak expires if he doesn't collect within the window ---
+        if (_combo > 0 && Time.time > _comboExpireAt) _combo = 0;
 
         // --- (kept) shove a standing aisle rider into a seat to free aisle space ---
         if (GameInput.Instance.altAction.WasPressedThisFrame()) TryShove();
@@ -83,7 +104,43 @@ public class InsideConductor : MonoBehaviour
             _text.text = "Tk " + _target.OwedFare + "   [E] collect";
     }
 
-    // pick the nearest un-paid aboard rider within reach; move the outline marker onto it (or hide it).
+    // ---------- SOLO auto-inside-conductor: walk to collectable riders and collect their fares ----------
+    void AiTick()
+    {
+        BusPassengers bp = BusPassengers.Instance;
+        if (bp == null) return;
+        Vector3 wc = bp.WalkCenter; float hw = bp.walkHalfWidth, hl = bp.walkHalfLength;
+
+        // find the nearest collectable rider (no reach limit — we'll walk to them)
+        Passenger goal = null; float bestSqr = float.MaxValue;
+        var list = bp.Aboard;
+        for (int i = 0; i < list.Count; i++)
+        {
+            Passenger p = list[i];
+            if (p == null || !p.CanCollect) continue;
+            float d = (p.transform.position - transform.position).sqrMagnitude;
+            if (d < bestSqr) { bestSqr = d; goal = p; }
+        }
+
+        if (goal != null)
+        {
+            // step toward the rider's aisle-projected position (clamped to the walk box)
+            Vector3 gl = transform.parent != null ? transform.parent.InverseTransformPoint(goal.transform.position) : goal.transform.position;
+            Vector3 p2 = transform.localPosition;
+            float spd = moveSpeed * (NearStanding() ? crowdSlowFactor : 1f);
+            p2.x = Mathf.MoveTowards(p2.x, Mathf.Clamp(gl.x, wc.x - hw, wc.x + hw), spd * Time.deltaTime);
+            p2.z = Mathf.MoveTowards(p2.z, Mathf.Clamp(gl.z, wc.z - hl, wc.z + hl), spd * Time.deltaTime);
+            p2.y = wc.y;
+            transform.localPosition = p2;
+
+            if ((goal.transform.position - transform.position).sqrMagnitude < reachRange * reachRange)
+                Collect(goal);
+        }
+    }
+
+    Passenger _selected;   // the rider currently outlined (so we can clear it when the target changes)
+
+    // pick the nearest un-paid aboard rider within reach; OUTLINE that rider's billboard (selection feedback).
     void UpdateTarget(BusPassengers bp)
     {
         _target = null;
@@ -100,26 +157,66 @@ public class InsideConductor : MonoBehaviour
             }
         }
 
-        if (_marker != null)
+        if (_selected != _target)
         {
-            bool show = _target != null;
-            if (_marker.gameObject.activeSelf != show) _marker.gameObject.SetActive(show);
-            if (show)
-            {
-                _marker.position = _target.transform.position + Vector3.up * 2.1f;
-                _marker.rotation = Camera.main != null ? Camera.main.transform.rotation : Quaternion.identity;
-            }
+            if (_selected != null) _selected.SetSelected(false);   // clear the old outline
+            if (_target != null) _target.SetSelected(true);        // outline the new target
+            _selected = _target;
         }
     }
 
+    [Header("Fare collection feel")]
+    [Tooltip("Seconds he must take between fares (no spamming — he counts the change).")]
+    public float collectCooldown = 0.7f;
+    [Tooltip("Seconds to collect the next fare and keep the combo alive.")]
+    public float comboWindow = 4f;
+    [Tooltip("Base bonus per combo step (× combo). SHOUTING into the mic multiplies it.")]
+    public int comboBaseBonus = 3;
+
+    float _collectReadyAt;
+    int _combo;
+    float _comboExpireAt;
+
+    public int Combo => _combo;     // HUD reads this
+
     void Collect(Passenger p)
     {
+        _collectReadyAt = Time.time + collectCooldown;   // gate the next collect (anti-spam)
+
+        var gn = BamePlastic.Net.GameNet.Instance;
+        if (gn != null && gn.Active && !gn.IsDriver)
+        {
+            // MULTIPLAYER conductor: send the INTENT; the DRIVER runs the real Collect + earnings and broadcasts
+            // the result. Combo/mic bonus is LOCAL feel — track the streak here for the HUD; the driver still
+            // owns the authoritative earnings (the base fare). Local feedback so it feels instant.
+            gn.SendCollectIntent(p.NetId);
+            BumpCombo();
+            Flash("Collecting…  x" + _combo);
+            return;
+        }
+
+        // solo OR the driver itself: collect locally.
         int amt = p.Collect();
         if (amt > 0)
         {
-            if (ShiftManager.Instance != null) ShiftManager.Instance.AddEarnings(amt);
-            Flash("Collected  Tk " + amt + " !");
+            BumpCombo();
+            // SHOUT bonus: louder = bigger combo bonus (calling out fares). 0 mic → tiny bonus; full shout → big.
+            float mic = MicInput.Instance != null ? MicInput.Instance.Loudness : 0f;
+            int bonus = Mathf.RoundToInt(comboBaseBonus * _combo * (0.5f + 1.5f * mic));
+            int total = amt + bonus;
+
+            if (ShiftManager.Instance != null) ShiftManager.Instance.AddEarnings(total);
+            Flash(bonus > 0 ? ("Tk " + amt + "  +" + bonus + "  COMBO x" + _combo + (mic > 0.55f ? " (LOUD!)" : ""))
+                            : ("Collected  Tk " + amt + " !"));
+            if (gn != null && gn.Active && gn.IsDriver) gn.DriverFareCollected(p, total, (byte)gn.LocalRole);
         }
+    }
+
+    void BumpCombo()
+    {
+        if (Time.time > _comboExpireAt) _combo = 0;   // expired → reset before counting this one
+        _combo++;
+        _comboExpireAt = Time.time + comboWindow;
     }
 
     void TryShove()
@@ -160,20 +257,6 @@ public class InsideConductor : MonoBehaviour
         _flashUntil = Time.time + 1.1f;
     }
 
-    // a small glowing quad that floats over the selected rider = the selection outline.
-    void BuildMarker()
-    {
-        if (_marker != null) return;
-        var go = GameObject.CreatePrimitive(PrimitiveType.Quad);
-        var col = go.GetComponent<Collider>(); if (col != null) Destroy(col);
-        go.name = "FareTarget";
-        go.transform.localScale = new Vector3(0.7f, 0.7f, 1f);
-        var r = go.GetComponent<Renderer>();
-        var sh = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
-        if (sh != null) { r.material = new Material(sh); if (r.material.HasProperty("_BaseColor")) r.material.SetColor("_BaseColor", new Color(1f, 0.78f, 0.3f)); if (r.material.HasProperty("_Color")) r.material.SetColor("_Color", new Color(1f, 0.78f, 0.3f)); }
-        _marker = go.transform;
-        _marker.gameObject.SetActive(false);
-    }
 
     void BuildUI()
     {

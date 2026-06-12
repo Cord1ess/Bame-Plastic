@@ -120,6 +120,9 @@ public class TiledRoadStreamer : MonoBehaviour
     {
         public RoadTile tile;
         public Vector3 startPt, endPt;   // world centreline endpoints (for recycle distance + joins)
+        public Vector3[] pts;            // world CENTRELINE ring points (the ACTUAL curved path the mesh traces).
+                                         // CenterlineAt interpolates along THESE — endpoint-only lerp chorded
+                                         // across curves (the "centreline goes straight on a corner" bug).
     }
 
     void Awake()
@@ -373,15 +376,22 @@ public class TiledRoadStreamer : MonoBehaviour
         float t = segLen2 > 1e-6f ? Mathf.Clamp01(Vector3.Dot(b - a, seg) / segLen2) : 0f;
         float raw = _busTileIndex + t;
 
-        if (!_busTileFInit) { _busTileF = raw; _busTileFInit = true; }
+        float prevTileF = _busTileF;
+        if (!_busTileFInit) { _busTileF = raw; _busTileFInit = true; _busArcAdvance = 0f; }
         else
         {
             // append-compensation: when front tiles were added this frame, _busTileIndex (and raw) shifted
             // up by _pendingIndexShift; apply that to _busTileF first so it stays on the same world spot,
             // then smooth only the genuine motion.
             _busTileF += _pendingIndexShift;
-            _pendingIndexShift = 0;
             _busTileF = Mathf.Lerp(_busTileF, raw, 1f - Mathf.Exp(-12f * Time.deltaTime));  // framerate-independent ease
+            // Signed change in the bus's continuous tileF this frame, MINUS the append shift (not real motion),
+            // expressed in metres. tileF DECREASES as the bus moves forward (front = lower index), so this is
+            // NEGATIVE when moving forward. Road-relative content adds THIS to its "metres ahead of bus" cursor
+            // (cursor += delta → decreases) instead of using busSpeed*dt — on curves world-speed ≠ centreline arc,
+            // which slid the cursor out of sync with placed buildings → the curve gaps.
+            _busArcAdvance = ((_busTileF - prevTileF) - _pendingIndexShift) * tileLength;
+            _pendingIndexShift = 0;
         }
 
         // Bus lateral offset on the road (metres right of centre) — so traffic can treat the bus as an
@@ -393,6 +403,11 @@ public class TiledRoadStreamer : MonoBehaviour
     bool _busTileFInit;
     int _pendingIndexShift;
     float _busLateral;
+    float _busArcAdvance;
+    /// Signed CENTRELINE arc (metres) the bus moved this frame (negative = forward, since front = lower tileF).
+    /// Road-relative streamed content should decay its bus-relative "metres ahead" cursor by ADDING this, not by
+    /// busSpeed*dt — on curves the bus's world speed ≠ its centreline-arc rate, and the mismatch slides the cursor.
+    public float BusArcAdvance => _busArcAdvance;
     /// The bus's lateral offset on the road (m right of centre). Traffic senses the bus as an obstacle here.
     public float BusLateral => _busLateral;
 
@@ -477,11 +492,17 @@ public class TiledRoadStreamer : MonoBehaviour
         tile.Build(cen, rt, up, R, prof, seg, cum, _profGroundHalf, roadThickness, _meta,
                    new[] { roadMaterial, footpathMaterial, groundMaterial, markingMaterial }, useBurst);
 
+        // Capture the WORLD centreline ring points (the actual curved path) BEFORE disposing cen — so
+        // CenterlineAt follows the curve instead of chording the endpoints. cen[i] is tile-local (relative to
+        // startWorld); ring 0 = rear (startWorld), ring R-1 = front (endWorld).
+        var ringPts = new Vector3[R];
+        for (int i = 0; i < R; i++) ringPts[i] = startWorld + (Vector3)cen[i];
+
         cen.Dispose(); rt.Dispose(); up.Dispose();
         prof.Dispose(); seg.Dispose(); cum.Dispose();
 
         Vector3 endWorld = _lead.head;
-        _live.Insert(0, new TileSpan { tile = tile, startPt = startWorld, endPt = endWorld });
+        _live.Insert(0, new TileSpan { tile = tile, startPt = startWorld, endPt = endWorld, pts = ringPts });
 
         // carry this tile's last sample + forward to the next tile's first ring
         _carryPt = endWorld;
@@ -576,6 +597,29 @@ public class TiledRoadStreamer : MonoBehaviour
         return true;
     }
 
+    /// Fill `outPts` with the live road CENTRELINE as a WORLD polyline, ordered BACK (index 0, behind the bus) →
+    /// FRONT (last index, the leading edge ahead of the bus). Deduped where adjacent tiles share a boundary knot.
+    /// For road-relative content that wants to march the road GEOMETRY directly in world space — this is
+    /// completely INDEPENDENT of the bus's tracked position (_busTileF), so it never suffers the spawn-time lag
+    /// that made bus-relative SampleRoad place content far ahead. The caller owns `outPts` (reuse it → no GC).
+    public void GetCenterline(System.Collections.Generic.List<Vector3> outPts)
+    {
+        outPts.Clear();
+        // _live[0] = front-most tile, _live[count-1] = back-most. Iterate back→front; within a tile pts[0]=rear
+        // (startPt) .. pts[R-1]=front (endPt), so 0..R-1 is also back→front. Adjacent tiles share a boundary knot.
+        for (int t = _live.Count - 1; t >= 0; t--)
+        {
+            var pts = _live[t].pts;
+            if (pts == null) continue;
+            for (int k = 0; k < pts.Length; k++)
+            {
+                Vector3 p = pts[k];
+                if (outPts.Count > 0 && (outPts[outPts.Count - 1] - p).sqrMagnitude < 1e-4f) continue;  // dedupe seam
+                outPts.Add(p);
+            }
+        }
+    }
+
     // --- Road sampling for traffic / world content (road-relative = floating-origin-invariant) ---
     public float TileLength => tileLength;
     public int LiveTileCount => _live.Count;
@@ -615,20 +659,15 @@ public class TiledRoadStreamer : MonoBehaviour
         Vector3 behind = CenterlineAt(tB);
         Vector3 d = ahead - behind; d.y = 0f;
         fwd = d.sqrMagnitude < 1e-8f ? Vector3.forward : d.normalized;
-        right = Vector3.Cross(Vector3.up, fwd).normalized;
+        // `right` = the SAME per-point perpendicular the road MESH uses for its cross-section at this ring
+        // (mesh: rt[i] = Cross(up, fwd) at each ring). Returning this exact normal (not Cross(up, smoothedFwd))
+        // is what makes a point at lateral=RoadHalf land EXACTLY on the mesh footpath edge through curves, and
+        // keeps callers' outward direction consistent with where their offset point was placed. (Earlier the
+        // smoothed/averaged offset diverged from the mesh normal on bends → buildings/peds drifted onto the road.)
+        right = Perp(tileF);
+        if (right.sqrMagnitude < 1e-8f) right = Vector3.Cross(Vector3.up, fwd).normalized;
 
-        // OFFSET, curvature-corrected: a naive center+right*lateral overshoots on the INSIDE of a bend (the
-        // offset point can cross the centreline on tight turns → peds/vehicles end up on the road). Sample the
-        // centreline a little ahead+behind and average their offsets so the point hugs the curve instead.
-        if (Mathf.Abs(lateral) > 0.01f)
-        {
-            Vector3 rA = Perp(tF), rB = Perp(tB);
-            Vector3 pA = ahead + rA * lateral;
-            Vector3 pB = behind + rB * lateral;
-            Vector3 pC = center + right * lateral;
-            pos = (pA + pB + pC * 2f) * 0.25f;     // weighted toward the exact point, smoothed by neighbours
-        }
-        else pos = center;
+        pos = Mathf.Abs(lateral) > 0.01f ? center + right * lateral : center;
         return true;
     }
 
@@ -639,15 +678,28 @@ public class TiledRoadStreamer : MonoBehaviour
     {
         tileF = Mathf.Clamp(tileF, 0f, _live.Count - 1);
         int i = Mathf.Clamp(Mathf.FloorToInt(tileF), 0, _live.Count - 1);
-        float t = tileF - i;
+        float t = tileF - i;                          // 0 = front edge (endPt), 1 = rear edge (startPt)
         TileSpan s = _live[i];
-        return Vector3.Lerp(s.endPt, s.startPt, t);
+
+        // Follow the actual CURVED path via the stored ring points (pts[0]=rear/startPt … pts[R-1]=front/endPt).
+        // Endpoint-only Lerp chorded straight across curves (the "centreline goes straight on a corner" bug).
+        if (s.pts != null && s.pts.Length >= 2)
+        {
+            int R = s.pts.Length;
+            float ring = (1f - t) * (R - 1);          // t=0→front=pts[R-1]; t=1→rear=pts[0]
+            int r0 = Mathf.Clamp(Mathf.FloorToInt(ring), 0, R - 1);
+            int r1 = Mathf.Min(r0 + 1, R - 1);
+            return Vector3.Lerp(s.pts[r0], s.pts[r1], ring - r0);
+        }
+        return Vector3.Lerp(s.endPt, s.startPt, t);   // fallback (shouldn't happen)
     }
 
-    // road-right (perpendicular) at a fractional tile index, from the local tangent.
+    // road-right (perpendicular) at a fractional tile index, from the local tangent. Baseline ≈ ONE mesh ring
+    // step (tileLength/(ringsPerTile-1)) so this normal matches the mesh's per-ring rt[i] — keeps lateral-offset
+    // points (buildings/peds/stops) sitting exactly on the mesh cross-section through curves.
     Vector3 Perp(float tileF)
     {
-        float e = 0.2f;
+        float e = 1f / Mathf.Max(2, ringsPerTile - 1);   // one ring spacing, in tile-fraction units
         Vector3 a = CenterlineAt(Mathf.Max(0f, tileF - e));
         Vector3 b = CenterlineAt(Mathf.Min(_live.Count - 1, tileF + e));
         Vector3 d = a - b; d.y = 0f;
@@ -694,7 +746,11 @@ public class TiledRoadStreamer : MonoBehaviour
         // seed the chain tracker at the spawn span (the middle tile — matches TryGetSpawnPose)
         _busTileIndex = Mathf.Clamp(_live.Count / 2, 0, _live.Count - 1);
         _busTileF = _busTileIndex + 0.5f;     // bus spawns mid-span; seed continuous pos so traffic frame-1 is sane
-        _busTileFInit = true;
+        // DON'T set _busTileFInit here: leaving it false makes the FIRST TrackBusIndex SNAP _busTileF to the bus's
+        // true projected position (raw) instead of slowly EASING toward it. The ease left _busTileF ~2 tiles
+        // (~120m) off the real bus for ~1s after spawn → road-relative content (buildings) seeded against a
+        // wrong metres=0 and landed far ahead. Snapping on frame 1 keeps SampleRoad(0,0) ≈ the bus from the start.
+        _busTileFInit = false;
         _busIndexValid = true;
     }
 
@@ -706,7 +762,12 @@ public class TiledRoadStreamer : MonoBehaviour
         // the giant connector gap / "road generating way further away" bug.
         _lead.head += delta;
         _carryPt += delta;
-        for (int i = 0; i < _live.Count; i++) { _live[i].startPt += delta; _live[i].endPt += delta; }
+        for (int i = 0; i < _live.Count; i++)
+        {
+            _live[i].startPt += delta; _live[i].endPt += delta;
+            var pts = _live[i].pts;                    // shift the curved-path ring points too, or CenterlineAt
+            if (pts != null) for (int k = 0; k < pts.Length; k++) pts[k] += delta;   // desyncs after a recenter
+        }
         OnOriginShiftedEvent?.Invoke(delta);
         // tile transforms are children of this object, which the scene-wide shift already moved.
     }

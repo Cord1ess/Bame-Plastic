@@ -42,6 +42,11 @@ public class FloatingOrigin : MonoBehaviour
     void LateUpdate()
     {
         if (!recenter) return;
+        // MULTIPLAYER: only the DRIVER recenters. All clients share one world origin so the driver's broadcast
+        // bus pose lands at the same world spot on every client (the road is identical via the seed). A
+        // conductor recentering independently would desync the proxy bus.
+        if (BamePlastic.Net.GameNet.Instance != null && BamePlastic.Net.GameNet.Instance.Active
+            && !BamePlastic.Net.GameNet.Instance.IsDriver) return;
         if (_bus == null) { Resolve(); if (_bus == null) return; }
 
         Vector3 flat = _bus.position;

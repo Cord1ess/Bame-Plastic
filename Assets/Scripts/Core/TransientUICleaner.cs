@@ -28,7 +28,7 @@ public static class TransientUICleaner
     {
         if (Application.isPlaying) return 0;
         int removed = 0;
-        foreach (var go in Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include, FindObjectsSortMode.None))
+        foreach (var go in Object.FindObjectsByType<GameObject>(FindObjectsInactive.Include))
         {
             if (go == null || go.transform.parent != null) continue;       // roots only
             if ((go.hideFlags & HideFlags.DontSave) != 0) continue;        // a live preview object — leave it

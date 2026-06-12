@@ -25,6 +25,9 @@ namespace BamePlastic.Net
         public event Action<string> JoinFailed;
         public event Action<RoomListing[]> RoomListUpdated;
         public event Action<int> ShiftStarting;
+#pragma warning disable 0067   // stub never raises this (no real disconnects in the in-memory fake)
+        public event Action<RoleReassign> RoleReassigned;
+#pragma warning restore 0067
 
         // simulation timers
         float _botJoinTimer;

@@ -9,13 +9,14 @@ using UnityEngine;
 ///      remapped to URP/Lit by hand, preserving the base map + flagging the transparent/clip ones as
 ///      alpha-clipped double-sided (Akihabara has lots of cut-out signage/decals).
 ///
-/// Scoped to the pack folder only. Idempotent — safe to re-run. Run via the menu AFTER extracting blocks.
+/// Scoped to Assets/ZRNAssets (imported packs — e.g. the Cars FBX still has built-in materials). Idempotent —
+/// safe to re-run. General-purpose now (the buildings are already converted); use it after importing any pack.
 public static class CityMaterialsToURP
 {
     const string PackDir = "Assets/ZRNAssets";
     static readonly string[] CustomBuiltinShaders = { "StandardDoubleClip", "su_Double_Clip", "su_VertexCol_1UV_Single" };
 
-    [MenuItem("Bame Plastic/Buildings/2. Convert City Materials → URP")]
+    [MenuItem("Bame Plastic/Convert Imported Materials → URP")]
     static void Convert()
     {
         Shader urpLit = Shader.Find("Universal Render Pipeline/Lit");

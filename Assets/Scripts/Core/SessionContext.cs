@@ -20,20 +20,22 @@ public class SessionContext : MonoBehaviour
     public int Seed { get; private set; }
     public RoomInfo Room { get; private set; }
 
-    // ---- backend selection (the ONE place the concrete service is chosen) ----
-    // Set USE_BACKEND=false to play against the in-memory stub (no server needed). When true, connects to the
-    // Spring Boot relay at BACKEND_URL. A PlayerPrefs key "net.offline"=1 forces the stub at runtime (so a
-    // Settings toggle / failed connection can fall back without a rebuild).
-    public const bool USE_BACKEND = true;
-    // 8090, not 8080 — EnterpriseDB/pgAdmin's bundled Apache (httpd) occupies 8080 on this machine.
-    public const string BACKEND_URL = "ws://localhost:8090/ws/session";
-    public const string OfflinePref = "net.offline";
-
+    // ---- backend selection ----
+    // The server to connect to is chosen IN-GAME via the Play Online server picker (ServerConfig, PlayerPrefs).
+    // "Offline" → the in-memory stub (no server needed). Otherwise → the WebSocket relay at ServerConfig.WsUrl.
     static INetworkService MakeService()
     {
-        bool offline = !USE_BACKEND || PlayerPrefs.GetInt(OfflinePref, 0) == 1;
-        if (offline) return new StubNetworkService();
-        return new WebSocketNetworkService(BACKEND_URL);
+        if (ServerConfig.Offline) return new StubNetworkService();
+        return new WebSocketNetworkService(ServerConfig.WsUrl);
+    }
+
+    /// Rebuild the network service from the CURRENT ServerConfig (called when the player changes the server in
+    /// the picker). Only valid before joining a room. Carries the player name over.
+    public void RebuildService()
+    {
+        string name = Net != null ? Net.LocalPlayerName : "Player";
+        Net = MakeService();
+        Net.LocalPlayerName = name;
     }
 
     public static SessionContext Ensure()

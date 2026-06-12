@@ -22,20 +22,20 @@ public class BusPassengers : MonoBehaviour
     public Vector3 doorLocalPos = new Vector3(-1.3f, 0f, 3.5f);
 
     [Header("Cabin (tune to your bus interior)")]
-    public Vector2Int seatGrid = new Vector2Int(5, 6);            // columns x rows (centre column = aisle)
-    public Vector3 cabinLocalCenter = new Vector3(0f, 1.1f, -0.5f);
-    public Vector3 cabinLocalSize = new Vector3(2.0f, 0f, 7.5f);
+    public Vector2Int seatGrid = new Vector2Int(5, 14);           // columns x rows (centre column = aisle)
+    public Vector3 cabinLocalCenter = new Vector3(0f, 0.8f, -0.45f);
+    public Vector3 cabinLocalSize = new Vector3(2.0f, 0f, 9.6f);
     [Range(0f, 1f)] [Tooltip("Seats fill (front-first) to this fraction before riders start standing.")]
     public float seatStandThreshold = 0.7f;
     [Tooltip("How many standing spots to scatter across the walk box (standing-crowd density).")]
     public int standCapacity = 12;
     [Header("Conductor walk area (the aisle lane)")]
     [Tooltip("Walk-box centre as an offset from cabinLocalCenter.")]
-    public Vector3 walkAreaOffset = Vector3.zero;
+    public Vector3 walkAreaOffset = new Vector3(-0.03f, 0f, 0.33f);
     [Tooltip("Half WIDTH of the walkable aisle (X). Lower = narrower lane.")]
-    public float walkHalfWidth = 0.3f;
+    public float walkHalfWidth = 0.08f;
     [Tooltip("Half LENGTH of the walkable aisle (Z).")]
-    public float walkHalfLength = 3.0f;
+    public float walkHalfLength = 4.8f;
     [Tooltip("Small random sideways jitter so the standing line isn't a rigid row.")]
     public float standJitter = 0.12f;
 
@@ -54,6 +54,7 @@ public class BusPassengers : MonoBehaviour
     readonly List<CabinSpot> _stands = new List<CabinSpot>();   // aisle, ordered FRONT -> back
     readonly List<CabinSpot> _tmp = new List<CabinSpot>();
     readonly List<Passenger> _aboard = new List<Passenger>();
+    readonly List<Passenger> _doorQueue = new List<Passenger>();   // boarders waiting their turn at the door
     float _doorCooldownUntil;
 
     public float Speed => (_controller != null && _controller.sphere != null) ? _controller.sphere.linearVelocity.magnitude : 0f;
@@ -78,12 +79,17 @@ public class BusPassengers : MonoBehaviour
             doorAnchor = d.transform;
         }
 
+        // parent the cabin to the TILTING visual (busModel) so riders LEAN/TILT with the bus on turns & drifts,
+        // instead of staying bolt-upright while the body leans (they'd poke out the side). Fall back to the root.
+        Transform cabinParent = (_controller != null && _controller.busModel != null) ? _controller.busModel : transform;
         GameObject c = new GameObject("Cabin");
-        c.transform.SetParent(transform, false);
+        c.transform.SetParent(cabinParent, false);
         c.transform.localPosition = Vector3.zero;
         _cabin = c.transform;
 
         BuildSlots();
+        // the roof "STOP REQUESTED" sign self-attaches (StopRequestIndicator, [RuntimeInitializeOnLoadMethod]),
+        // so BusPassengers doesn't reference its type (keeps this file independent of that one).
     }
 
     void BuildSlots()
@@ -145,17 +151,69 @@ public class BusPassengers : MonoBehaviour
         return FrontFree(_stands) != null;
     }
 
-    /// Passenger calls this on reaching the door. Returns a reserved spot (seat front-first under the
-    /// threshold, otherwise a standing spot at the front of the aisle), or null if full / on cooldown.
+    /// A boarder who reached the door joins the queue (FIFO). The bus grants them aisle entry one-at-a-time.
+    public void JoinDoorQueue(Passenger p)
+    {
+        if (p != null && !_doorQueue.Contains(p)) _doorQueue.Add(p);
+    }
+
+    void Update()
+    {
+        if (!Application.isPlaying) return;
+        // DRAIN THE DOOR QUEUE one-at-a-time (boardInterval apart) — the front boarder gets a reserved spot and
+        // threads the aisle to it; the rest keep waiting at the door (a visible queue). Driver-authoritative in
+        // MP: conductor clients mirror via the PassengerBoard message instead of granting locally.
+        var gn = BamePlastic.Net.GameNet.Instance;
+        bool authoritative = gn == null || !gn.Active || gn.IsDriver;
+        if (!authoritative) { PruneDoorQueue(); return; }
+
+        // STOPPED ANYWHERE: riders who rang the bell get off here (not only at official stops) — pull over for the
+        // roof indicator and they alight onto the footpath. Driver-authoritative (this whole Update is gated).
+        if (Speed <= boardSpeedThreshold) ReleaseAlightersAtStop();
+
+        PruneDoorQueue();
+        if (_doorQueue.Count == 0) return;
+        if (Time.time < _doorCooldownUntil) return;
+        if (Speed > boardSpeedThreshold) return;     // only board while stopped/slow
+
+        // reserve the front boarder a spot (seat front-first under threshold, else front of the aisle)
+        CabinSpot spot = SeatsUnderThreshold() ? FrontFree(_seats) : null;
+        if (spot == null) spot = FrontFree(_stands);
+        if (spot == null) return;                    // full → queue waits
+
+        Passenger next = _doorQueue[0];
+        _doorQueue.RemoveAt(0);
+        spot.occupied = true;
+        _doorCooldownUntil = Time.time + boardInterval;
+        next.BeginAisleEntry(spot, AisleEntryLocal());
+    }
+
+    void PruneDoorQueue()
+    {
+        for (int i = _doorQueue.Count - 1; i >= 0; i--)
+        {
+            var p = _doorQueue[i];
+            if (p == null || p.CurrentState != Passenger.State.QueuingAtDoor) _doorQueue.RemoveAt(i);
+        }
+    }
+
+    // cabin-local point just inside the door where boarders enter the aisle (door X/Z projected onto the aisle
+    // centre-line, at the cabin floor). Boarders walk door → here → their spot, so they thread the aisle.
+    public Vector3 AisleEntryLocal()
+    {
+        Vector3 d = doorLocalPos;
+        return new Vector3(WalkCenter.x, WalkCenter.y, d.z);   // aisle X, door Z → the aisle mouth at the door
+    }
+    /// the door's CABIN-LOCAL position (riders alight to here, then step out to the footpath).
+    public Vector3 DoorLocal => doorLocalPos;
+
+    /// Legacy direct-board (kept for any caller); the queued path above is preferred.
     public CabinSpot TakeBoardingSpot()
     {
         if (Time.time < _doorCooldownUntil) return null;
-
-        CabinSpot spot = null;
-        if (SeatsUnderThreshold()) spot = FrontFree(_seats);
+        CabinSpot spot = SeatsUnderThreshold() ? FrontFree(_seats) : null;
         if (spot == null) spot = FrontFree(_stands);
         if (spot == null) return null;
-
         spot.occupied = true;
         _doorCooldownUntil = Time.time + boardInterval;
         return spot;
@@ -166,6 +224,44 @@ public class BusPassengers : MonoBehaviour
     {
         _aboard.Add(p);
         BoardedCount++;
+        Sfx.Play("passenger_board", 0.35f, 1.2f);   // 2D, quiet, once-per-burst (long throttle → no repeats)
+        // MULTIPLAYER: the DRIVER broadcasts this board so the conductors mirror the exact rider + spot.
+        var gn = BamePlastic.Net.GameNet.Instance;
+        if (gn != null && gn.Active && gn.IsDriver) gn.DriverPassengerBoarded(p, SpotIndex(p.Spot), p.Spot != null && p.Spot.isSeat);
+    }
+
+    // ---- multiplayer spot indexing: seats get 0..N-1, standing spots get N.. (stable across clients) ----
+    public int SpotIndex(CabinSpot s)
+    {
+        if (s == null) return -1;
+        int i = _seats.IndexOf(s); if (i >= 0) return i;
+        i = _stands.IndexOf(s); if (i >= 0) return _seats.Count + i;
+        return -1;
+    }
+    public CabinSpot SpotByIndex(int idx)
+    {
+        if (idx < 0) return null;
+        if (idx < _seats.Count) return _seats[idx];
+        idx -= _seats.Count;
+        return (idx < _stands.Count) ? _stands[idx] : null;
+    }
+
+    /// CONDUCTOR mirror: place a passenger the DRIVER boarded into the same cabin spot (no stop sim).
+    public void MirrorBoard(Passenger p, int spotIdx, bool isSeat)
+    {
+        var spot = SpotByIndex(spotIdx);
+        if (spot == null || p == null) return;
+        spot.occupied = true;
+        p.MirrorTakeSpot(this, spot);
+        if (!_aboard.Contains(p)) _aboard.Add(p);
+    }
+    /// CONDUCTOR mirror: remove a passenger the DRIVER alighted.
+    public void MirrorAlight(Passenger p)
+    {
+        if (p == null) return;
+        if (p.Spot != null) ReleaseSpot(p.Spot);
+        _aboard.Remove(p);
+        p.MirrorLeave();
     }
 
     /// Called when the bus is stopped at a stop: any aboard rider who rang the bell starts to alight + walk off.
@@ -176,6 +272,13 @@ public class BusPassengers : MonoBehaviour
 
     /// The inside conductor's reachable riders (aboard) — used for nearest-unpaid selection.
     public System.Collections.Generic.IReadOnlyList<Passenger> Aboard => _aboard;
+
+    /// True if ANY aboard rider has rung the bell (wants off) — drives the roof "STOP REQUESTED" indicator and
+    /// the bus's slow-down. Derived from the synced aboard set, so it's consistent on all MP clients.
+    public bool StopRequested
+    {
+        get { for (int i = 0; i < _aboard.Count; i++) if (_aboard[i] != null && _aboard[i].WantsOff) return true; return false; }
+    }
 
     /// Conductor 2 shoves a standing rider: they walk back to a free seat (random — naturally rear-ward),
     /// or the backmost free standing spot if no seats are free. Returns false if nowhere to go.

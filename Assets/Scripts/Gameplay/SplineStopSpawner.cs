@@ -15,10 +15,10 @@ public class SplineStopSpawner : MonoBehaviour
     public static SplineStopSpawner Instance { get; private set; }
 
     [Header("Placement")]
-    [Tooltip("Drop a stop on roughly every Nth advanced section (randomised a little).")]
-    public int sectionsPerStop = 4;
+    [Tooltip("Drop a stop on roughly every Nth advanced section (randomised a little). Lower = MORE FREQUENT stops.")]
+    public int sectionsPerStop = 2;
     [Tooltip("Max live stops at once (older ones recycle as the bus passes).")]
-    public int maxLiveStops = 4;
+    public int maxLiveStops = 6;
     [Tooltip("Recycle a stop once the bus is this far PAST it (metres behind).")]
     public float recycleDistance = 70f;
 
@@ -26,8 +26,8 @@ public class SplineStopSpawner : MonoBehaviour
     [Tooltip("Initial crowd seeded when a stop appears. Keep LOW if FootpathPedestrians (L5) is feeding it — " +
              "the crowd then visibly grows as walkers arrive. Raise toward crowdMax if you want full stops " +
              "without walkers.")]
-    public int crowdMin = 3;
-    public int crowdMax = 8;
+    public int crowdMin = 5;
+    public int crowdMax = 14;
     public float crowdSpread = 6f;
     public float curbDepth = 1.2f;
 
@@ -132,7 +132,9 @@ public class SplineStopSpawner : MonoBehaviour
 
         EnsureBox(st);
         st.box.SetActive(true);
-        st.box.transform.SetPositionAndRotation(stopPos + Vector3.up * 0.75f, Quaternion.LookRotation(fwd, Vector3.up));
+        // a real shelter model is base-pivoted → sit on the ground; the cube fallback is centre-pivoted → lift it.
+        float lift = _stopIsCube ? 0.75f : 0f;
+        st.box.transform.SetPositionAndRotation(stopPos + Vector3.up * lift, Quaternion.LookRotation(fwd, Vector3.up));
 
         // borrow a crowd scattered on the footpath behind the kerb
         int want = Random.Range(crowdMin, crowdMax + 1);
@@ -152,13 +154,30 @@ public class SplineStopSpawner : MonoBehaviour
         _live.Add(st);
     }
 
+    static GameObject _stopPrefab;        // Resources/Vehicles/busstop (loaded once)
+    static bool _stopPrefabTried;
+    bool _stopIsCube;                     // current shelters are the cube fallback (no model available)
+
     void EnsureBox(Stop st)
     {
         if (st.box != null) return;
+
+        if (!_stopPrefabTried) { _stopPrefab = Resources.Load<GameObject>("Vehicles/Props/busstop"); _stopPrefabTried = true; }
+
+        if (_stopPrefab != null)
+        {
+            st.box = Instantiate(_stopPrefab, transform);
+            st.box.name = "SplineBusStop";
+            foreach (var col in st.box.GetComponentsInChildren<Collider>(true)) Destroy(col);  // visual only
+            _stopIsCube = false;
+            return;
+        }
+
+        // fallback: the old orange cube (game still works with no model)
         st.box = GameObject.CreatePrimitive(PrimitiveType.Cube);
         st.box.name = "SplineBusStop";
-        Collider col = st.box.GetComponent<Collider>();
-        if (col != null) Destroy(col);
+        Collider c = st.box.GetComponent<Collider>();
+        if (c != null) Destroy(c);
         st.box.transform.SetParent(transform, false);
         st.box.transform.localScale = new Vector3(1.2f, 1.5f, 1.2f);
         Renderer br = st.box.GetComponent<Renderer>();
@@ -172,6 +191,7 @@ public class SplineStopSpawner : MonoBehaviour
                 br.material = m;
             }
         }
+        _stopIsCube = true;
     }
 
     void Update()
@@ -340,6 +360,16 @@ public class SplineStopSpawner : MonoBehaviour
             if (d2 < best) { best = d2; found = _live[i]; }
         }
         return found;
+    }
+
+    /// Is there a live bus stop within `range` metres of `pos`? Used by the auto-conductor to decide it's
+    /// safe to hop off (he only leaves the bus at a stop, not randomly mid-road).
+    public bool IsNearStop(Vector3 pos, float range)
+    {
+        float r2 = range * range;
+        for (int i = 0; i < _live.Count; i++)
+            if ((_live[i].stopPos - pos).sqrMagnitude <= r2) return true;
+        return false;
     }
 
     /// Called by FloatingOrigin after a recenter. Stop boxes + waiting passengers are children of the

@@ -133,7 +133,7 @@ public class MenuMode : MonoBehaviour
     {
         if (_menu != null) return;
         // destroy any orphaned MenuUI from a prior instance/recompile so we never end up with two menus
-        foreach (var existing in FindObjectsByType<MenuController>(FindObjectsSortMode.None)) Kill(existing.gameObject);
+        foreach (var existing in FindObjectsByType<MenuController>()) Kill(existing.gameObject);
         EnsureEventSystem();
         var go = new GameObject("MenuUI");
         go.hideFlags = HideFlags.DontSave;               // not serialized; rebuilt each load (edit & play)

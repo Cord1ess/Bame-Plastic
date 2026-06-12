@@ -24,13 +24,19 @@ public class SpeedometerHud : MonoBehaviour
 
     void Start() { BuildUI(); }
 
+    int _lastSpeed = int.MinValue, _lastGear = int.MinValue;
+
     void Update()
     {
         if (_bus == null) _bus = BusController.Instance;
         if (_bus == null) return;
 
-        _speed.text = Mathf.RoundToInt(_bus.SpeedKmh).ToString();
-        _gear.text = "GEAR " + _bus.Gear;
+        // only rebuild the text strings when the displayed integer actually CHANGES (avoids a string alloc every
+        // frame → no per-frame GC on WebGL). Speed/gear change a few times a second, not 60×.
+        int spd = Mathf.RoundToInt(_bus.SpeedKmh);
+        if (spd != _lastSpeed) { _speed.text = spd.ToString(); _lastSpeed = spd; }
+        int gear = _bus.Gear;
+        if (gear != _lastGear) { _gear.text = "GEAR " + gear; _lastGear = gear; }
 
         float rpm = Mathf.Clamp01(_bus.Rpm01);
         _rpmFillRT.sizeDelta = new Vector2(_rpmInner * rpm, _rpmFillRT.sizeDelta.y);

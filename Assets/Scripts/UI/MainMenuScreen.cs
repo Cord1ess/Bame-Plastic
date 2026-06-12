@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
+using BamePlastic.Net;
 
 /// Title screen — LEFT-ALIGNED and VERTICALLY CENTRED (the bus sits on the right, menu on the left). Game
 /// name, accent rule, and the primary menu stacked down the left, centred as a block on screen. On entering
@@ -31,21 +32,21 @@ public class MainMenuScreen
         Transform c = colGO.transform;
 
         // y positions measured from the column centre (top = +, bottom = -)
-        var title = Place(PixelUI.Label(c, "Title", "BAME PLASTIC", 88, TextAnchor.MiddleLeft, PixelUI.Ink, outline: true), 280, new Vector2(1000, 110));
-        var sub   = Place(PixelUI.Label(c, "Subtitle", "DHAKA BUS CO-OP", 30, TextAnchor.MiddleLeft, PixelUI.Gold, outline: true), 206, new Vector2(640, 40));
-        var rule  = Place(PixelUI.Block(c, "Rule", PixelUI.Gold), 172, new Vector2(300, 3));
+        var title = Place(PixelUI.Label(c, "Title", "BAAME PLASTIC", 88, TextAnchor.MiddleLeft, PixelUI.Ink, outline: true), 250, new Vector2(1000, 110));
+        var rule  = Place(PixelUI.Block(c, "Rule", PixelUI.Gold), 186, new Vector2(300, 3));
 
-        float bw = 380f, bh = 72f, gap = 88f, by0 = 70f;
+        float bw = 380f, bh = 60f, gap = 70f, by0 = 170f;
         AddButton(c, "Play", "PLAY ONLINE", by0,            bw, bh, menu.PlayMultiplayer, PixelUI.Gold);
         AddButton(c, "Solo", "PLAY SOLO",   by0 - gap,      bw, bh, menu.PlaySolo,        PixelUI.Cyan);
-        AddButton(c, "Settings", "SETTINGS", by0 - gap * 2, bw, bh, menu.OpenSettings,    PixelUI.InkDim);
+        AddButton(c, "Shop", "SHOP & CUSTOMIZE", by0 - gap * 2, bw, bh, menu.OpenStore,   PixelUI.Green);
+        AddButton(c, "Leaderboard", "LEADERBOARD", by0 - gap * 3, bw, bh, menu.OpenLeaderboard, PixelUI.Gold);
+        AddButton(c, "Settings", "SETTINGS", by0 - gap * 4, bw, bh, menu.OpenSettings,    PixelUI.InkDim);
 #if !UNITY_WEBGL
-        AddButton(c, "Quit", "QUIT",         by0 - gap * 3, bw, bh, menu.Quit,            PixelUI.Red);
+        AddButton(c, "Quit", "QUIT",         by0 - gap * 5, bw, bh, menu.Quit,            PixelUI.Red);
 #endif
 
-        // springs in visual order: title, sub, rule, then the buttons (already appended)
+        // springs in visual order: title, rule, then the buttons (already appended)
         _springs.Insert(0, AddSpring(rule.rectTransform));
-        _springs.Insert(0, AddSpring(sub.rectTransform));
         _springs.Insert(0, AddSpring(title.rectTransform));
 
         // version tag, bottom-left of the SCREEN
@@ -53,6 +54,13 @@ public class MainMenuScreen
         var vrt = ver.rectTransform;
         vrt.anchorMin = vrt.anchorMax = new Vector2(0, 0); vrt.pivot = new Vector2(0, 0);
         vrt.anchoredPosition = new Vector2(MarginX, 24); vrt.sizeDelta = new Vector2(360, 26);
+
+        // LOG OUT — bottom-right; only meaningful for a real account (guests have nothing to log out of)
+        var logout = PixelUIWidgets.Button(_root.transform, "Logout", "LOG OUT", new Vector2(1, 0), new Vector2(-28, 24),
+                                           new Vector2(160, 44), menu.Logout, PixelUI.InkDim);
+        logout.gameObject.SetActive(PlayerAccount.LoggedIn);
+        // keep the logout button's visibility in sync with the account state while the title is shown
+        PlayerAccount.Changed += () => { if (logout != null) logout.gameObject.SetActive(PlayerAccount.LoggedIn); };
     }
 
     // left-pivoted at column-x 0, vertical position y (from column centre)

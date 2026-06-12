@@ -13,16 +13,22 @@ using Random = UnityEngine.Random;
 public class TrafficSystem : MonoBehaviour
 {
     [Header("Population")]
-    [Tooltip("UPPER BOUND on vehicles alive at once. Actual count is limited by spacing — the street fills " +
-             "only as far as the gaps allow, so raising this past what fits does nothing.")]
-    [Min(0)] public int maxVehicles = 8;
+    [Tooltip("UPPER BOUND on vehicles alive at once (both sides). Actual count is limited by spacing.")]
+    [Min(0)] public int maxVehicles = 75;
+    [Tooltip("Target vehicles on the SAME-direction (going) side.")]
+    [Min(0)] public int maxSameDir = 25;
+    [Tooltip("Target vehicles on the ONCOMING (upcoming) side — HIGHER so the oncoming lane feels busier.")]
+    [Min(0)] public int maxOncoming = 50;
+    [Tooltip("Max new vehicles spawned per frame while filling toward the targets (ramps the road up fast " +
+             "without a one-frame hitch; the road reaches the target over a few frames).")]
+    [Min(1)] public int maxSpawnPerFrame = 8;
     [Tooltip("Don't spawn within this margin (m) of the live road's far edge (avoids visible pop-in there).")]
     public float edgeMargin = 20f;
 
     [Header("Spacing (keeps gaps so the bus can weave)")]
     [Tooltip("Min clear gap (m) along the road between two vehicles sharing the same side+lane before a new " +
              "one may spawn there. Bigger = roomier; smaller = denser/tighter to thread.")]
-    public float minGap = 20f;
+    public float minGap = 13f;
     [Tooltip("Two vehicles count as 'same lane' (and must respect minGap) if their lateral offsets are within " +
              "this many metres. Below it = sharing space; beyond = a different lane, no gap needed.")]
     public float sameLaneWidth = 2.5f;
@@ -30,18 +36,22 @@ public class TrafficSystem : MonoBehaviour
     [Min(1)] public int spawnAttempts = 6;
 
     [Header("Spawn ahead / cull behind (camera can't look back)")]
-    [Tooltip("Vehicles spawn no closer than this far AHEAD of the bus, so they appear in the distance and " +
-             "drive toward you — never pop in right in front. Should be beyond the visible-ahead range.")]
-    public float spawnMinAhead = 70f;
+    [Tooltip("Vehicles spawn no closer than this far AHEAD of the bus — set it NEAR the smog distance (~180-220m, " +
+             "DayNightController.smogFullDistance is ~230) so they emerge from the haze in the distance and drive " +
+             "toward you, NEVER popping in nearby. Too low and you'll see them appear right in front.")]
+    public float spawnMinAhead = 185f;
     [Tooltip("Recycle a vehicle once it's this far BEHIND the bus. Small, since the player can't look back.")]
     public float cullBehind = 18f;
 
     [Header("Mix (relative weights)")]
-    public float rickshawWeight = 0.65f;   // bikes/rickshaws dominate (nimble, small — leave gaps to thread)
-    public float carWeight = 0.25f;
-    public float busWeight = 0.10f;
+    public float rickshawWeight = 0.74f;   // rickshaws + CNGs dominate (nimble, small — leave gaps to thread)
+    public float carWeight = 0.16f;        // cars/bikes
+    public float busWeight = 0.05f;
+    public float truckWeight = 0.05f;      // normal trucks (heavy-ish, not a wall)
     [Tooltip("Hard cap on AI buses alive at once (big blockers — keep the road threadable for the guide line).")]
     [Min(0)] public int maxBuses = 2;
+    [Tooltip("Chance per second an oncoming small vehicle cuts ACROSS to our side and merges (Dhaka chaos hazard).")]
+    [Range(0f, 0.3f)] public float crossChancePerSec = 0.03f;
 
     [Header("Speeds (m/s)")]
     public Vector2 rickshawSpeed = new Vector2(5f, 8f);
@@ -57,8 +67,13 @@ public class TrafficSystem : MonoBehaviour
     Transform _parent;
     readonly List<TrafficVehicle> _live = new List<TrafficVehicle>();
     readonly Stack<TrafficVehicle> _pool = new Stack<TrafficVehicle>();
-    Random.State _rng;
+    // DEDICATED RNG (System.Random) seeded from the shared session seed → traffic is deterministic per client AND
+    // independent of Unity's global Random (which every other system consumes at different rates → would desync /
+    // corrupt determinism). This is the robust MP-safe choice. Helpers below.
+    System.Random _rand;
     bool _ready;
+    float RandF() => (float)_rand.NextDouble();
+    float RandRange(float a, float b) => a + (b - a) * RandF();
 
     /// Live vehicles, for the DriverGuide planner to read (positions/speeds in road-relative space).
     public IReadOnlyList<TrafficVehicle> Live => _live;
@@ -67,6 +82,8 @@ public class TrafficSystem : MonoBehaviour
     // rivals: real TrafficVehicles with a RivalBrain. Ticked/separated/avoided like everyone else, but NEVER
     // pooled away — when one falls behind we reposition it ahead so it keeps competing all shift.
     readonly List<TrafficVehicle> _rivals = new List<TrafficVehicle>();
+    /// All deployed rivals — a RivalBrain reads this to QUEUE behind other rivals camping the same stop.
+    public IReadOnlyList<TrafficVehicle> Rivals => _rivals;
 
     /// Spawn (or returns) a persistent rival bus driven by a RivalBrain. Called by RivalManager at start.
     public TrafficVehicle SpawnRival(string rivalName, Color color)
@@ -79,8 +96,8 @@ public class TrafficSystem : MonoBehaviour
         brain.SetName(rivalName);
 
         float lat = LateralFor(TrafficVehicle.Kind.Bus, +1);
-        float metres = spawnMinAhead + Random.Range(10f, 40f);
-        v.Acquire(TrafficVehicle.Kind.Bus, _nextId++, metres, lat, Random.Range(busSpeed.x, busSpeed.y), +1,
+        float metres = spawnMinAhead + RandRange(10f, 40f);
+        v.Acquire(TrafficVehicle.Kind.Bus, _nextId++, metres, lat, RandRange(busSpeed.x, busSpeed.y), +1,
                   SizeFor(TrafficVehicle.Kind.Bus), color);
         v.Brain = brain;                       // attach AFTER Acquire (Acquire doesn't touch Brain)
         v.SetSolid(true);                      // rivals are SOLID physics walls — the bus clashes naturally
@@ -89,8 +106,11 @@ public class TrafficSystem : MonoBehaviour
         return v;
     }
 
+    public static TrafficSystem Instance { get; private set; }
+
     void Awake()
     {
+        Instance = this;
         _road = GetComponent<TiledRoadStreamer>();
         _zone = GetComponent<RoadZone>();
     }
@@ -110,8 +130,13 @@ public class TrafficSystem : MonoBehaviour
     void Start()
     {
         if (!Application.isPlaying) return;
-        Random.InitState(seed != 0 ? seed : 0xB00 ^ Random.Range(int.MinValue, int.MaxValue));
-        _rng = Random.state;
+        // shared session seed (all MP clients match) ⊕ a constant so traffic isn't correlated with the road seed;
+        // falls back to this component's seed or a time seed in solo/edit.
+        int s = seed != 0 ? seed
+              : (SessionContext.Instance != null && SessionContext.Instance.Seed != 0
+                    ? SessionContext.Instance.Seed ^ 0x7A77C0DE
+                    : System.Environment.TickCount);
+        _rand = new System.Random(s);
         EnsureParent();
         _ready = true;
     }
@@ -153,49 +178,72 @@ public class TrafficSystem : MonoBehaviour
         // and lateral get nudged apart in logical space (no physics → stays deterministic across clients).
         SeparateOverlaps(dt);
 
-        // top up: new vehicles spawn FAR AHEAD (in the distance, off-screen where the road is generating)
-        // and drive toward the bus — never pop in nearby.
-        int guard = 0;
-        while (_live.Count < maxVehicles && guard++ < maxVehicles)
+        // LANE CROSSING: occasionally a small oncoming vehicle (rickshaw/car) cuts ACROSS the road onto our side
+        // and merges into our flow — Dhaka chaos + a hazard to dodge. Rolled here (deterministic RNG), only for an
+        // oncoming small vehicle that's well AHEAD (so the player sees the whole manoeuvre) and not a rival.
+        for (int i = 0; i < _live.Count; i++)
         {
-            if (!SpawnOne(ahead)) break;   // no room ahead (road too short right now) — try again next frame
+            TrafficVehicle v = _live[i];
+            if (v.Brain != null || v.Crossing || v.dir != -1) continue;
+            if (v.kind == TrafficVehicle.Kind.Bus || v.kind == TrafficVehicle.Kind.Truck) continue;   // only small ones cut across
+            if (v.metresFromBus < 25f || v.metresFromBus > ahead - 20f) continue;
+            if (RandF() < crossChancePerSec * dt) v.BeginCross();
+        }
+
+        // top up PER SIDE to its own target — the oncoming side carries more (maxOncoming) so it feels busier;
+        // the going side stays at maxSameDir. Fill whichever side is furthest below its target each frame. New
+        // vehicles spawn FAR AHEAD (off-screen, where the road is generating) and drive toward you — no pop-in.
+        // top up both sides toward their targets. Spawning a few PER FRAME (not one) lets the road fill quickly;
+        // a failed placement on one side doesn't abort the whole top-up — we try the other side, and only give
+        // up after several consecutive fails (genuinely no room this frame; retry next frame).
+        int guard = 0, fails = 0;
+        int perFrame = maxSpawnPerFrame > 0 ? maxSpawnPerFrame : 8;   // guard: a 0-deserialize wouldn't stall spawning
+        int budgetThisFrame = Mathf.Min(perFrame, maxVehicles - _live.Count);
+        while (budgetThisFrame > 0 && _live.Count < maxVehicles && guard++ < maxVehicles && fails < 6)
+        {
+            int same = CountDir(+1), onc = CountDir(-1);
+            float sameDeficit = maxSameDir - same, oncDeficit = maxOncoming - onc;
+            if (sameDeficit <= 0f && oncDeficit <= 0f) break;        // both sides full
+            int dir = oncDeficit >= sameDeficit ? -1 : +1;            // fill the emptier side
+            if (SpawnOne(ahead, dir)) { budgetThisFrame--; fails = 0; }
+            else
+            {
+                // that side had no room this attempt — try the OTHER side before counting a fail
+                if (SpawnOne(ahead, -dir)) { budgetThisFrame--; fails = 0; }
+                else fails++;
+            }
         }
     }
 
-    bool SpawnOne(float ahead)
+    int CountDir(int dir)
     {
-        // need a window between spawnMinAhead and the far edge to place a vehicle ahead
+        int n = 0;
+        for (int i = 0; i < _live.Count; i++) if (_live[i].dir == dir && _live[i].Brain == null) n++;  // rivals excluded
+        return n;
+    }
+
+    bool SpawnOne(float ahead, int dir)
+    {
         if (ahead <= spawnMinAhead + 2f) return false;
 
-        Random.state = _rng;
-
-        // pick the vehicle's identity first (kind/dir/lane), then hunt for a spot ahead that has a clear gap
-        // from any other vehicle in the same side+lane. If no clear spot in a few tries, give up this frame
-        // (so the street fills only as densely as the spacing allows — never stacking vehicles).
         TrafficVehicle.Kind kind = PickKind();
         if (kind == TrafficVehicle.Kind.Bus && CountAheadBuses() >= maxBuses)
             kind = TrafficVehicle.Kind.Car;   // bus cap reached → downgrade to a car
-        int dir = Random.value < 0.55f ? +1 : -1;
-        float lat = LateralFor(kind, dir) + Random.Range(-0.4f, 0.4f);
 
-        float metres = 0f;
+        // hunt for a clear spot across BOTH distance AND lane — the road has several lanes per direction, so a
+        // full lane at one distance doesn't block another lane. Each attempt re-rolls the lateral lane.
+        float metres = 0f, lat = 0f;
         bool placed = false;
         for (int attempt = 0; attempt < spawnAttempts; attempt++)
         {
-            float candidate = Random.Range(spawnMinAhead, ahead);
-            if (HasClearGap(candidate, lat, dir)) { metres = candidate; placed = true; break; }
+            float candidate = RandRange(spawnMinAhead, ahead);
+            float candLat = LateralFor(kind, dir);
+            if (HasClearGap(candidate, candLat, dir)) { metres = candidate; lat = candLat; placed = true; break; }
         }
-
-        if (!placed) { _rng = Random.state; return false; }
-
-        float spd = SpeedFor(kind);
-        Vector3 size = SizeFor(kind);
-        Color col = ColorFor(kind);
-
-        _rng = Random.state;
+        if (!placed) return false;
 
         TrafficVehicle v = Take();
-        v.Acquire(kind, _nextId++, metres, lat, spd, dir, size, col);
+        v.Acquire(kind, _nextId++, metres, lat, SpeedFor(kind), dir, SizeFor(kind), ColorFor(kind));
         _live.Add(v);
         return true;
     }
@@ -215,21 +263,25 @@ public class TrafficSystem : MonoBehaviour
         return true;
     }
 
-    // Anti-stack: nudge any same-direction pair that's overlapping in BOTH axes apart, along whichever axis
-    // they overlap LESS (cheaper escape). Deterministic (index order decides who moves which way), no physics.
-    // Skips knocked vehicles (those are mid-tumble). O(N^2) — fine at this N.
+    // HARD anti-overlap: FULLY resolve any overlapping pair every frame (not a slow nudge) so vehicles can NEVER
+    // pass through / clip each other — covers ALL pairs (incl. oncoming + crossing), not just same-direction.
+    // Deterministic (index order + position decide the split), no physics → MP-safe. O(N^2), fine at this N.
+    // A couple of relaxation iterations settle 3-way pileups cleanly.
     void SeparateOverlaps(float dt)
     {
-        const float lateralBuffer = 0.25f;
-        const float pushSpeed = 6f;       // m/s of separation correction
+        const float lateralBuffer = 0.3f;
+        for (int iter = 0; iter < 2; iter++)
         for (int a = 0; a < _live.Count; a++)
         {
             TrafficVehicle va = _live[a];
-            if (va.Knocked) continue;
+            // skip crossing (traversing the median) + a NORMAL vehicle mid-tumble. Rivals (Solid) ALWAYS separate
+            // from each other even while the bus is shoving them — else two clashing rivals (always _shoveT>0)
+            // would never part and would drive THROUGH each other.
+            if (va.Crossing || (va.Knocked && !va.Solid)) continue;
             for (int b = a + 1; b < _live.Count; b++)
             {
                 TrafficVehicle vb = _live[b];
-                if (vb.Knocked || vb.dir != va.dir) continue;             // only same-direction pairs
+                if (vb.Crossing || (vb.Knocked && !vb.Solid)) continue;
 
                 float dM = vb.metresFromBus - va.metresFromBus;
                 float dL = vb.lateral - va.lateral;
@@ -237,18 +289,21 @@ public class TrafficSystem : MonoBehaviour
                 float overlapL = (va.HalfWidth + vb.HalfWidth + lateralBuffer) - Mathf.Abs(dL);
                 if (overlapM <= 0f || overlapL <= 0f) continue;           // not overlapping in both → fine
 
-                float step = pushSpeed * dt;
-                if (overlapL < overlapM)                                  // easier to part sideways
+                // push them FULLY apart along the axis with the smaller overlap (cheaper escape), splitting the
+                // correction 50/50. This closes the overlap THIS frame — no slow-nudge lag → no visible clipping.
+                if (overlapL <= overlapM)
                 {
-                    float dir = dL >= 0f ? 1f : -1f;                      // push b to +side, a to -side
-                    va.Nudge(0f, -dir * step);
-                    vb.Nudge(0f,  dir * step);
+                    float sgn = dL >= 0f ? 1f : -1f;
+                    float half = overlapL * 0.5f + 0.01f;
+                    va.Nudge(0f, -sgn * half);
+                    vb.Nudge(0f,  sgn * half);
                 }
-                else                                                      // part longitudinally
+                else
                 {
-                    float dir = dM >= 0f ? 1f : -1f;
-                    va.Nudge(-dir * step, 0f);
-                    vb.Nudge( dir * step, 0f);
+                    float sgn = dM >= 0f ? 1f : -1f;
+                    float half = overlapM * 0.5f + 0.01f;
+                    va.Nudge(-sgn * half, 0f);
+                    vb.Nudge( sgn * half, 0f);
                 }
             }
         }
@@ -256,11 +311,12 @@ public class TrafficSystem : MonoBehaviour
 
     TrafficVehicle.Kind PickKind()
     {
-        float total = Mathf.Max(0.0001f, rickshawWeight + carWeight + busWeight);
-        float r = Random.value * total;
+        float total = Mathf.Max(0.0001f, rickshawWeight + carWeight + busWeight + truckWeight);
+        float r = RandF() * total;
         if (r < rickshawWeight) return TrafficVehicle.Kind.Rickshaw;
         if (r < rickshawWeight + carWeight) return TrafficVehicle.Kind.Car;
-        return TrafficVehicle.Kind.Bus;
+        if (r < rickshawWeight + carWeight + busWeight) return TrafficVehicle.Kind.Bus;
+        return TrafficVehicle.Kind.Truck;
     }
 
     int CountAheadBuses()
@@ -276,15 +332,19 @@ public class TrafficSystem : MonoBehaviour
     {
         bool forward = dir > 0;
         float sideSign = (forward == _zone.leftHandTraffic) ? -1f : 1f;   // forward+LHT → -X
-        float inner = _zone.MedianHalf;
-        float outer = _zone.DriveHalf;
-        float t;                                  // 0 = inner (near median), 1 = outer (near footpath)
+        float inner = _zone.MedianHalf + 0.6f;     // keep off the median line
+        float outer = _zone.DriveHalf - 0.6f;      // keep off the kerb
+        // each kind BIASES a zone but SPREADS across it (real lanes) so a whole kind isn't one packed lane:
+        //   rickshaw = outer half (edge), bus = inner half (median side), car = anywhere across the drive.
+        float tMin, tMax;
         switch (kind)
         {
-            case TrafficVehicle.Kind.Rickshaw: t = 0.82f; break;   // hug the edge
-            case TrafficVehicle.Kind.Bus:      t = 0.30f; break;   // toward inner
-            default:                            t = 0.55f; break;   // cars mid
+            case TrafficVehicle.Kind.Rickshaw: tMin = 0.55f; tMax = 1.0f;  break;   // outer half
+            case TrafficVehicle.Kind.Bus:      tMin = 0.0f;  tMax = 0.45f; break;   // inner half
+            case TrafficVehicle.Kind.Truck:    tMin = 0.0f;  tMax = 0.5f;  break;   // inner-ish like big vehicles
+            default:                            tMin = 0.1f;  tMax = 0.95f; break;   // cars fill the road
         }
+        float t = RandRange(tMin, tMax);
         float x = Mathf.Lerp(inner, outer, t);
         return sideSign * x;
     }
@@ -292,17 +352,18 @@ public class TrafficSystem : MonoBehaviour
     float SpeedFor(TrafficVehicle.Kind kind)
     {
         Vector2 r = kind == TrafficVehicle.Kind.Rickshaw ? rickshawSpeed
-                  : kind == TrafficVehicle.Kind.Bus ? busSpeed : carSpeed;
-        return Random.Range(r.x, r.y);
+                  : (kind == TrafficVehicle.Kind.Bus || kind == TrafficVehicle.Kind.Truck) ? busSpeed : carSpeed;
+        return RandRange(r.x, r.y);
     }
 
     static Vector3 SizeFor(TrafficVehicle.Kind kind)
     {
         switch (kind)
         {
-            case TrafficVehicle.Kind.Rickshaw: return new Vector3(1.0f, 1.6f, 2.0f);
-            case TrafficVehicle.Kind.Bus:      return new Vector3(2.4f, 3.0f, 9.0f);
-            default:                            return new Vector3(1.8f, 1.5f, 4.2f);
+            case TrafficVehicle.Kind.Rickshaw: return new Vector3(1.3f, 1.9f, 2.6f);    // a bit bigger
+            case TrafficVehicle.Kind.Bus:      return new Vector3(3.2f, 4.2f, 13.5f);
+            case TrafficVehicle.Kind.Truck:    return new Vector3(2.5f, 3.0f, 8.0f);    // own size (smaller than bus)
+            default:                            return new Vector3(2.2f, 1.8f, 5.0f);   // CARS bigger (were too small)
         }
     }
 
@@ -312,6 +373,7 @@ public class TrafficSystem : MonoBehaviour
         {
             case TrafficVehicle.Kind.Rickshaw: return new Color(0.2f, 0.55f, 0.35f);   // CNG-green-ish
             case TrafficVehicle.Kind.Bus:      return new Color(0.75f, 0.65f, 0.25f);
+            case TrafficVehicle.Kind.Truck:    return new Color(0.55f, 0.5f, 0.45f);
             default:                            return new Color(0.6f, 0.62f, 0.66f);
         }
     }
@@ -344,9 +406,9 @@ public class TrafficSystem : MonoBehaviour
     // pooling it. Keeps it in _live; just resets its road-relative position to a fresh forward lane.
     void RepositionRivalAhead(TrafficVehicle v, float ahead)
     {
-        float metres = Mathf.Clamp(spawnMinAhead + Random.Range(10f, 40f), spawnMinAhead, Mathf.Max(spawnMinAhead + 1f, ahead));
-        float lat = LateralFor(TrafficVehicle.Kind.Bus, +1) + Random.Range(-0.3f, 0.3f);
+        float metres = Mathf.Clamp(spawnMinAhead + RandRange(10f, 40f), spawnMinAhead, Mathf.Max(spawnMinAhead + 1f, ahead));
+        float lat = LateralFor(TrafficVehicle.Kind.Bus, +1) + RandRange(-0.3f, 0.3f);
         v.Nudge(metres - v.metresFromBus, lat - v.lateral);
-        v.speed = Random.Range(busSpeed.x, busSpeed.y);
+        v.speed = RandRange(busSpeed.x, busSpeed.y);
     }
 }

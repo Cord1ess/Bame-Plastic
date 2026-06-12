@@ -7,11 +7,13 @@ public class SettingsScreen
 {
     readonly GameObject _root;
     readonly MenuController _menu;
+    readonly System.Action _onBack;     // in-game (pause) use: no MenuController; Back just closes the panel
     GameObject[] _pages;
 
-    public SettingsScreen(Transform parent, MenuController menu)
+    public SettingsScreen(Transform parent, MenuController menu, System.Action onBack = null)
     {
         _menu = menu;
+        _onBack = onBack;
         _root = new GameObject("SettingsScreen", typeof(RectTransform));
         _root.transform.SetParent(parent, false);
         var rt = (RectTransform)_root.transform;
@@ -31,7 +33,7 @@ public class SettingsScreen
         hrt.anchoredPosition = new Vector2(pad, -22); hrt.sizeDelta = new Vector2(innerW, 48);
 
         // tabs row (build pages first — Tabs.Init calls Select(0) → SelectPage which needs _pages)
-        string[] tabs = { "AUDIO", "GRAPHICS", "PLAYER", "CONTROLS" };
+        string[] tabs = { "AUDIO", "GRAPHICS", "GAMEPLAY", "PLAYER", "CONTROLS" };
         _pageW = innerW;                                  // every row lays out within this width (no overflow)
         _pages = new GameObject[tabs.Length];
         for (int i = 0; i < tabs.Length; i++)
@@ -46,15 +48,16 @@ public class SettingsScreen
 
         BuildAudio(_pages[0].transform);
         BuildGraphics(_pages[1].transform);
-        BuildPlayer(_pages[2].transform);
-        BuildControls(_pages[3].transform);
+        BuildGameplay(_pages[2].transform);
+        BuildPlayer(_pages[3].transform);
+        BuildControls(_pages[4].transform);
 
         // tab bar under the heading
         PixelUIWidgets.Tabs(pan, "Tabs", tabs, new Vector2(0, 1f), new Vector2(pad, -84), new Vector2(innerW, 50), SelectPage);
 
         // back button, bottom-left of the panel
         PixelUIWidgets.Button(pan, "Back", "◀ BACK", new Vector2(0, 0f), new Vector2(pad, 22), new Vector2(220, 56),
-                              () => { SettingsStore.Save(); _menu.BackToTitle(); }, PixelUI.InkDim);
+                              () => { SettingsStore.Save(); if (_onBack != null) _onBack(); else if (_menu != null) _menu.BackToTitle(); }, PixelUI.InkDim);
 
         SelectPage(0);
     }
@@ -111,6 +114,7 @@ public class SettingsScreen
         PixelUIWidgets.Stepper(p, "Fps", fpsLabels, CtrlAnchor, CtrlPos(1), new Vector2(CtrlW, 42), fpsIdx,
                                i => SettingsStore.TargetFps = SettingsStore.FpsOptions[i]);
 
+#if !UNITY_WEBGL
         RowLabel(p, 2, "RESOLUTION");
         var res = Resolutions();
         string[] labels = new string[res.Length];
@@ -122,17 +126,65 @@ public class SettingsScreen
         }
         PixelUIWidgets.Stepper(p, "Resolution", labels, CtrlAnchor, CtrlPos(2), new Vector2(CtrlW, 42), cur,
                                i => SettingsStore.SetResolution(res[i].x, res[i].y));
+#else
+        RowLabel(p, 2, "RESOLUTION");
+        PixelUI.Label(p, "ResWeb", "browser-controlled", 18, TextAnchor.MiddleLeft, PixelUI.InkDim)
+               .rectTransform.anchoredPosition = CtrlPos(2) + new Vector2(6f, -8f);
+#endif
 
-        RowLabel(p, 3, "FULLSCREEN");
-        PixelUIWidgets.Toggle(p, "Fullscreen", "", CtrlAnchor, CtrlPos(3), new Vector2(42, 42), SettingsStore.Fullscreen,
+        RowLabel(p, 3, "RENDER SCALE");
+        string[] rsLabels = { "60%", "70%", "80%", "90%", "100%" };
+        float[] rsVals = { 0.6f, 0.7f, 0.8f, 0.9f, 1.0f };
+        int rsIdx = System.Array.IndexOf(rsVals, Mathf.Round(SettingsStore.RenderScale * 10f) / 10f); if (rsIdx < 0) rsIdx = 4;
+        PixelUIWidgets.Stepper(p, "RenderScale", rsLabels, CtrlAnchor, CtrlPos(3), new Vector2(CtrlW, 42), rsIdx,
+                               i => SettingsStore.RenderScale = rsVals[i]);
+
+        RowLabel(p, 4, "VSYNC");
+        PixelUIWidgets.Toggle(p, "VSync", "", CtrlAnchor, CtrlPos(4), new Vector2(42, 42), SettingsStore.VSync,
+                              v => SettingsStore.VSync = v);
+
+#if !UNITY_WEBGL
+        RowLabel(p, 5, "FULLSCREEN");
+        PixelUIWidgets.Toggle(p, "Fullscreen", "", CtrlAnchor, CtrlPos(5), new Vector2(42, 42), SettingsStore.Fullscreen,
                               v => SettingsStore.Fullscreen = v);
+        int applyRow = 6;
+#else
+        int applyRow = 5;   // no fullscreen / no window-resolution control on WebGL (browser owns the canvas)
+#endif
 
         // APPLY button — commits all graphics settings at once
-        var apply = PixelUIWidgets.Button(p, "Apply", "APPLY", new Vector2(1, 1), new Vector2(0, -(4 * RowH) - 6f),
-                                          new Vector2(CtrlW, 48), () => SettingsStore.ApplyGraphics(), PixelUI.Green);
+        PixelUIWidgets.Button(p, "Apply", "APPLY", new Vector2(1, 1), new Vector2(0, -(applyRow * RowH) - 6f),
+                              new Vector2(CtrlW, 48), () => SettingsStore.ApplyGraphics(), PixelUI.Green);
         // note under it
         PixelUI.Label(p, "GfxNote", "click APPLY to commit graphics changes", 16, TextAnchor.UpperLeft, PixelUI.InkDim)
-               .rectTransform.anchoredPosition = new Vector2(0, -(5 * RowH) + 4f);
+               .rectTransform.anchoredPosition = new Vector2(0, -((applyRow + 1) * RowH) + 4f);
+    }
+
+    void BuildGameplay(Transform p)
+    {
+        RowLabel(p, 0, "CAMERA SHAKE");
+        PixelUIWidgets.Slider(p, "Shake", CtrlAnchor, CtrlPos(0), new Vector2(CtrlW, 30), SettingsStore.CameraShake,
+                              v => SettingsStore.CameraShake = v, PixelUI.Red);
+
+        RowLabel(p, 1, "DRIVER GUIDE LINE");
+        PixelUIWidgets.Toggle(p, "Guide", "", CtrlAnchor, CtrlPos(1), new Vector2(42, 42), SettingsStore.GuideLine,
+                              v => SettingsStore.GuideLine = v);
+
+        RowLabel(p, 2, "INVERT CAM DRAG");
+        PixelUIWidgets.Toggle(p, "Invert", "", CtrlAnchor, CtrlPos(2), new Vector2(42, 42), SettingsStore.InvertCam,
+                              v => SettingsStore.InvertCam = v);
+
+        RowLabel(p, 3, "CONDUCTOR MIC");
+        PixelUIWidgets.Toggle(p, "Mic", "", CtrlAnchor, CtrlPos(3), new Vector2(42, 42), SettingsStore.MicEnabled,
+                              v => SettingsStore.MicEnabled = v);
+
+        var hint = PixelUI.Label(p, "GpHint", "Conductor mic: SHOUT to call passengers (C1) or boost fares (C2). " +
+                                 "Guide line is the eagle-vision optimal path. Shake/guide apply instantly.",
+                                 16, TextAnchor.UpperLeft, PixelUI.InkDim);
+        var hr = hint.rectTransform;
+        hr.anchorMin = new Vector2(0, 1); hr.anchorMax = new Vector2(0, 1); hr.pivot = new Vector2(0, 1);
+        hr.anchoredPosition = new Vector2(0, -4 * RowH - 4f); hr.sizeDelta = new Vector2(_pageW, 80);
+        var ht = hint.GetComponent<Text>(); if (ht != null) ht.horizontalOverflow = HorizontalWrapMode.Wrap;
     }
 
     void BuildPlayer(Transform p)

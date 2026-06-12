@@ -8,14 +8,28 @@ using UnityEngine;
 /// and walk away on the footpath as a pedestrian (no more auto-disappear).
 public class Passenger : MonoBehaviour
 {
-    public enum State { Hidden, Walking, Waiting, Gathering, Held, Thrown, HeadingToDoor, Aboard, Alighting }
+    public enum State { Hidden, Walking, Waiting, Gathering, Held, Thrown, HeadingToDoor, QueuingAtDoor, EnteringAisle, Aboard, Alighting }
     public State state = State.Hidden;
+
+    // multiplayer identity: PoolIndex is the stable per-client id (same passenger N everywhere, set once by the
+    // pool); NetId is assigned by the DRIVER on board so conductors can reference the exact rider.
+    public int PoolIndex = -1;
+    public ushort NetId;
 
     public float moveSpeed = 3.5f;
     public float throwDuration = 0.55f;
     public float throwArcHeight = 2.5f;
     Vector3 _throwStart;
     float _throwT;
+
+    // ---- boarding CHAOS: each rider has a slightly different speed + a wandering side-offset so they DON'T
+    //      march to the door in a neat line. Set once per acquire from the id (stable, MP-deterministic-ish). ----
+    float _speedMul = 1f;          // 0.8..1.25 per-rider speed variation
+    float _wanderPhase;            // phase for the lateral wander
+    Vector3 _avoidVel;             // smoothed push-away from nearby vehicles (so dodging isn't jittery)
+    Vector3 _avoidTarget;          // last computed avoidance push (recomputed ~10Hz, lerped toward each frame)
+    float _avoidScan;              // throttle timer for the (expensive) all-traffic avoidance scan
+    public float vehicleAvoidRadius = 3.0f;   // start dodging a vehicle within this
 
     public float cabinWalkSpeed = 2.5f;   // moving to a seat/stand spot when shoved
 
@@ -56,7 +70,7 @@ public class Passenger : MonoBehaviour
         if (!CanCollect) return 0;
         _paid = true;
         int amt = _owedFare;
-        if (_view != null) _view.SetColor(ColPaid);
+        Indicate(ColPaid);
         return amt;
     }
 
@@ -67,16 +81,30 @@ public class Passenger : MonoBehaviour
         _spot = target;
         _targetLocal = target.local + jitter;
         _walking = true;
-        if (_view != null) _view.SetColor(ColHeading);
+        Indicate(ColHeading);
     }
 
+    // STATE is shown by a floating DOT above the head (SetIndicator), NOT by recolouring the body — so real
+    // character art drops in unchanged. The body keeps a neutral colour; these are the DOT colours per state.
     static readonly Color ColHeading  = new Color(0.95f, 0.85f, 0.2f);   // yellow: heading / walking
-    static readonly Color ColSeated   = new Color(0.85f, 0.45f, 0.4f);   // unpaid seated (reddish = owes fare)
-    static readonly Color ColStanding = new Color(0.9f, 0.55f, 0.45f);   // unpaid standing (owes fare)
-    static readonly Color ColPaid     = new Color(0.35f, 0.85f, 0.5f);   // GREEN once they've paid
-    static readonly Color ColWalking  = new Color(0.7f, 0.72f, 0.78f);   // grey: a pedestrian, not a fare yet
+    static readonly Color ColSeated   = new Color(0.9f, 0.35f, 0.3f);    // red dot: unpaid (owes fare)
+    static readonly Color ColStanding = new Color(0.95f, 0.45f, 0.35f);  // orange-red dot: unpaid standing
+    static readonly Color ColPaid     = new Color(0.35f, 0.85f, 0.5f);   // GREEN dot: paid
+    static readonly Color ColWalking  = new Color(0f, 0f, 0f, 0f);       // no dot: a plain pedestrian (not a fare)
+    static readonly Color BodyNeutral = new Color(0.82f, 0.8f, 0.86f);   // the body's fixed colour (placeholder art)
+
+    // drive the overhead dot + keep the body neutral. Central so every state goes through one path.
+    void Indicate(Color dot)
+    {
+        if (_view == null) return;
+        _view.SetColor(BodyNeutral);
+        if (dot.a <= 0.01f) _view.HideIndicator(); else _view.SetIndicator(dot);
+    }
 
     public void Setup(BillboardCharacter view) { _view = view; }
+
+    /// Conductor selection outline (a halo on the billboard) — replaces the old separate marker quad.
+    public void SetSelected(bool on) { if (_view != null) _view.SetSelected(on); }
 
     // legacy read kept for rivals/HUD: the fare they'd represent if stolen at a stop = the first tier.
     public int Fare => FareTiers[0];
@@ -86,13 +114,67 @@ public class Passenger : MonoBehaviour
         ResetCommon();
         state = State.Waiting;
         if (!gameObject.activeSelf) gameObject.SetActive(true);
-        if (_view != null) { _view.ApplyHeight(); _view.SetColor(baseColor); }
+        if (_view != null) _view.ApplyHeight();
+        Indicate(ColHeading);   // waiting at a stop = a fare to grab (yellow dot)
     }
 
     void ResetCommon()
     {
         _bus = null; _spot = null; _walking = false;
         _timeAboard = 0f; _owedFare = 0; _paid = false; _wantsOff = false; _rideTime = 0f;
+        // per-rider boarding chaos (varies speed + wander so the crowd isn't a marching line)
+        _speedMul = Random.Range(0.8f, 1.25f);
+        _wanderPhase = Random.Range(0f, 6.28f);
+        _avoidVel = Vector3.zero;
+    }
+
+    // Move toward `target` in WORLD space with CHAOS: per-rider speed, a sideways wander, and AVOIDANCE of the
+    // bus + traffic vehicles (so boarders dodge cars like footpath walkers do, instead of walking through them).
+    void MoveToDoorChaotic(Vector3 target)
+    {
+        Vector3 pos = transform.position;
+        Vector3 toTarget = target - pos; toTarget.y = 0f;
+        float dist = toTarget.magnitude;
+        Vector3 dir = dist > 0.01f ? toTarget / dist : Vector3.zero;
+
+        // wander: a small sideways oscillation perpendicular to the travel dir (eases off as they near the door)
+        Vector3 sideAxis = new Vector3(-dir.z, 0f, dir.x);
+        float wander = Mathf.Sin(Time.time * 2.3f + _wanderPhase) * 0.6f * Mathf.Clamp01(dist / 4f);
+
+        // avoidance: push away from any vehicle (incl. the bus) within range. The scan over ALL traffic is the
+        // expensive bit, so RECOMPUTE it only ~10×/sec (staggered per-passenger) and keep lerping _avoidVel
+        // toward the cached push every frame → identical look, a fraction of the cost at high crowd density.
+        _avoidScan -= Time.deltaTime;
+        if (_avoidScan <= 0f)
+        {
+            _avoidScan = 0.1f + (_wanderPhase * 0.01f);   // ~10Hz, staggered so they don't all scan the same frame
+            Vector3 push = AvoidFrom(BusController.Instance != null ? BusController.Instance.transform.position : pos, pos, 3.2f);
+            var ts = TrafficSystem.Instance;
+            if (ts != null)
+            {
+                var live = ts.Live;
+                for (int i = 0; i < live.Count; i++)
+                {
+                    var v = live[i]; if (v == null || !v.isActiveAndEnabled) continue;
+                    push += AvoidFrom(v.transform.position, pos, vehicleAvoidRadius);
+                }
+            }
+            _avoidTarget = push;
+        }
+        _avoidVel = Vector3.Lerp(_avoidVel, _avoidTarget, 6f * Time.deltaTime);   // smooth so dodging reads natural
+
+        Vector3 step = (dir + sideAxis * wander) * (moveSpeed * _speedMul) + _avoidVel;
+        Vector3 next = pos + step * Time.deltaTime;
+        next.y = pos.y;
+        transform.position = next;
+    }
+
+    static Vector3 AvoidFrom(Vector3 vehiclePos, Vector3 myPos, float radius)
+    {
+        Vector3 away = myPos - vehiclePos; away.y = 0f;
+        float d = away.magnitude;
+        if (d >= radius || d < 0.001f) return Vector3.zero;
+        return (away / d) * (radius - d) * 2.2f;   // stronger the closer the vehicle
     }
 
     public void Hide()
@@ -107,14 +189,15 @@ public class Passenger : MonoBehaviour
         ResetCommon();
         state = State.Walking;
         if (!gameObject.activeSelf) gameObject.SetActive(true);
-        if (_view != null) { _view.ApplyHeight(); _view.SetColor(ColWalking); }
+        if (_view != null) { _view.ApplyHeight(); _view.SetTiltWithParent(false); }  // stand upright on foot
+        Indicate(ColWalking);   // plain pedestrian → no dot
     }
 
     /// A walker that reached a stop turns into a waiting fare.
     public void ConvertToWaiting(Color baseColor)
     {
         state = State.Waiting;
-        if (_view != null) _view.SetColor(baseColor);
+        Indicate(ColHeading);   // a waiting fare
     }
 
     public void BeginGather(Vector3 curbTarget)
@@ -136,7 +219,7 @@ public class Passenger : MonoBehaviour
         _throwStart = transform.position;
         _throwT = 0f;
         state = State.Thrown;
-        if (_view != null) _view.SetColor(ColHeading);
+        Indicate(ColHeading);
     }
 
     public void BeginBoarding(BusPassengers bus)
@@ -144,7 +227,7 @@ public class Passenger : MonoBehaviour
         if (state != State.Waiting && state != State.Gathering && state != State.Held) return;
         _bus = bus;
         state = State.HeadingToDoor;
-        if (_view != null) _view.SetColor(ColHeading);
+        Indicate(ColHeading);
     }
 
     void Update()
@@ -152,7 +235,7 @@ public class Passenger : MonoBehaviour
         switch (state)
         {
             case State.Gathering:
-                transform.position = Vector3.MoveTowards(transform.position, _gatherTarget, moveSpeed * Time.deltaTime);
+                MoveToDoorChaotic(_gatherTarget);
                 break;
 
             case State.Thrown:
@@ -169,8 +252,28 @@ public class Passenger : MonoBehaviour
                 Vector3 door = _bus.DoorPosition;
                 float dSqr = (transform.position - door).sqrMagnitude;
                 if (dSqr > 120f * 120f) { LeaveToPool(); return; }
-                transform.position = Vector3.MoveTowards(transform.position, door, moveSpeed * Time.deltaTime);
-                if (dSqr < 1.2f) TryBoard();
+                MoveToDoorChaotic(door);                 // chaotic approach + dodges vehicles
+                if (dSqr < 1.6f) { state = State.QueuingAtDoor; _bus.JoinDoorQueue(this); }
+                break;
+
+            case State.QueuingAtDoor:
+                // wait at the door until it's our turn AND a spot is free; meanwhile hold near the door so a
+                // crowd visibly queues. The bus grants the next boarder via TryGrantBoard().
+                if (_bus == null) { state = State.Waiting; return; }
+                MoveToDoorChaotic(_bus.DoorPosition);    // jostle at the door instead of a neat line
+                break;
+
+            case State.EnteringAisle:
+                // walk DOOR → aisle-entry → our spot, INSIDE the cabin (local space), so they thread the aisle
+                // instead of snapping. _aisleStage: 0 = to aisle entry, 1 = to the spot.
+                if (_spot == null) { state = State.Aboard; break; }
+                Vector3 goal = _aisleStage == 0 ? _aisleEntryLocal : _spot.local;
+                transform.localPosition = Vector3.MoveTowards(transform.localPosition, goal, cabinWalkSpeed * Time.deltaTime);
+                if ((transform.localPosition - goal).sqrMagnitude < 0.04f)
+                {
+                    if (_aisleStage == 0) _aisleStage = 1;     // reached aisle entry → head to the seat/stand
+                    else SettleAboard();                       // reached the spot → settled
+                }
                 break;
 
             case State.Aboard:
@@ -180,7 +283,8 @@ public class Passenger : MonoBehaviour
                     if ((transform.localPosition - _targetLocal).sqrMagnitude < 0.01f)
                     {
                         _walking = false;
-                        if (_view != null) { _view.ApplyHeight(); _view.SetColor(SettledColor()); }
+                        if (_view != null) _view.ApplyHeight();
+                        Indicate(SettledColor());
                     }
                     break;   // fare/ride timers pause while shuffling
                 }
@@ -188,29 +292,59 @@ public class Passenger : MonoBehaviour
                 break;
 
             case State.Alighting:
-                // walk to the door, then hand off to FootpathPedestrians as a walker on the kerb.
+                // MIRROR of boarding, in reverse: thread the aisle OUT to the DOOR in cabin-local space (stay
+                // parented to the cabin so they follow the bus), THEN detach + step to the footpath. _aisleStage:
+                // 0 = seat → aisle-mouth, 1 = aisle-mouth → door, 2 = stepped out → walk to footpath (world).
                 if (_bus == null) { LeaveToPool(); return; }
-                Vector3 d2 = _bus.DoorPosition;
-                transform.SetParent(null, true);
-                transform.position = Vector3.MoveTowards(transform.position, d2, moveSpeed * Time.deltaTime);
-                if ((transform.position - d2).sqrMagnitude < 1.2f) StepOffToFootpath();
+                if (_aisleStage < 2)
+                {
+                    Vector3 exitGoal = _aisleStage == 0 ? _aisleEntryLocal : _bus.DoorLocal;
+                    transform.localPosition = Vector3.MoveTowards(transform.localPosition, exitGoal, cabinWalkSpeed * Time.deltaTime);
+                    if ((transform.localPosition - exitGoal).sqrMagnitude < 0.04f)
+                    {
+                        if (_aisleStage == 0) _aisleStage = 1;          // at the aisle mouth → head to the door
+                        else { _aisleStage = 2; transform.SetParent(null, true); }   // at the door → step out to world
+                    }
+                }
+                else
+                {
+                    // stepped out at the door → walk the last bit onto the footpath, then become a pedestrian.
+                    Vector3 d2 = _bus.DoorPosition;
+                    transform.position = Vector3.MoveTowards(transform.position, d2, moveSpeed * Time.deltaTime);
+                    StepOffToFootpath();   // hand to FootpathPedestrians (it places them on the kerb + walks them)
+                }
                 break;
         }
     }
 
-    void TryBoard()
+    Vector3 _aisleEntryLocal;   // cabin-local point just inside the door where boarders enter the aisle
+    int _aisleStage;            // 0 = walking to aisle entry, 1 = walking to the spot
+
+    /// The bus grants THIS queued boarder a reserved spot — start threading the aisle to it. Called by
+    /// BusPassengers.TryGrantBoard() (driver-authoritative in MP). Re-parents into the cabin at the door.
+    public void BeginAisleEntry(BusPassengers.CabinSpot spot, Vector3 aisleEntryLocal)
     {
-        BusPassengers.CabinSpot spot = _bus.TakeBoardingSpot();
         if (spot == null) return;
         _spot = spot;
+        _aisleEntryLocal = aisleEntryLocal;
+        _aisleStage = 0;
         _walking = false;
         transform.SetParent(_bus.Cabin, false);
-        transform.localPosition = spot.local;
-        // boarding sets up the FARE + RIDE timers; NO auto-fare (the conductor collects).
+        // enter at the door's cabin-local position so the walk starts AT the door, not snapped to the spot
+        transform.localPosition = aisleEntryLocal;
+        if (_view != null) _view.ApplyHeight();
+        Indicate(ColHeading);
+        state = State.EnteringAisle;
+    }
+
+    void SettleAboard()
+    {
+        _walking = false;
         _timeAboard = 0f; _owedFare = FareTiers[0]; _paid = false; _wantsOff = false;
         _rideTime = Random.Range(rideMin, rideMax);
-        if (_view != null) { _view.ApplyHeight(); _view.SetColor(SettledColor()); }
-        _bus.CompleteBoard(this);     // just registers them aboard — no money
+        if (_view != null) { _view.ApplyHeight(); _view.SetTiltWithParent(true); }  // lean with the bus
+        Indicate(SettledColor());
+        _bus.CompleteBoard(this);     // registers them aboard — no money
         state = State.Aboard;
     }
 
@@ -242,11 +376,45 @@ public class Passenger : MonoBehaviour
     /// Called by BusPassengers when the bus is stopped at a stop: any rider who wants off begins alighting.
     public void TryAlightAtStop()
     {
-        if (state == State.Aboard && _wantsOff && !_walking) state = State.Alighting;
+        if (state == State.Aboard && _wantsOff && !_walking)
+        {
+            _aisleStage = 0;                                  // thread the aisle OUT from the seat (stages 0→1→2)
+            if (_bus != null) _aisleEntryLocal = _bus.AisleEntryLocal();   // aisle mouth at the door (fresh)
+            if (_view != null) _view.SetTiltWithParent(true);   // still in the cabin → still tilts
+            Indicate(ColHeading);
+            state = State.Alighting;
+        }
     }
+
+    // ---- multiplayer mirror (conductor clients): place/remove a rider to match the driver, WITHOUT running
+    //      the local board/ride state machine (the driver is authoritative for fares/alighting). ----
+    public void MirrorTakeSpot(BusPassengers bus, BusPassengers.CabinSpot spot)
+    {
+        _bus = bus; _spot = spot; _walking = false;
+        transform.SetParent(bus.Cabin, false);
+        transform.localPosition = spot.local;
+        state = State.Aboard;
+        if (_view != null) { _view.ApplyHeight(); _view.SetTiltWithParent(true); }
+        Indicate(SettledColor());
+    }
+    public void MirrorLeave()
+    {
+        _spot = null;
+        var peds = FootpathPedestrians.Instance;
+        if (peds == null || !peds.AdoptAsWalker(this))
+        {
+            if (PassengerPool.Instance != null) PassengerPool.Instance.Return(this); else Hide();
+        }
+        _bus = null;
+    }
+    /// the conductor sets a rider's paid state when the driver broadcasts FareCollected.
+    public void MirrorPaid() { _paid = true; Indicate(ColPaid); }
 
     void StepOffToFootpath()
     {
+        // DRIVER: broadcast the alight so conductors remove the same rider.
+        var gn = BamePlastic.Net.GameNet.Instance;
+        if (gn != null && gn.Active && gn.IsDriver) gn.DriverPassengerAlighted(this);
         // free the cabin spot
         if (_bus != null && _spot != null) _bus.LeaveCabin(this, _spot);
         _spot = null;

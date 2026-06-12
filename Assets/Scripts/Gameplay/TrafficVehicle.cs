@@ -16,7 +16,7 @@ using UnityEngine;
 /// All sensing reads only deterministic logical state, so it stays identical across multiplayer clients.
 public class TrafficVehicle : MonoBehaviour
 {
-    public enum Kind { Rickshaw, Car, Bus }
+    public enum Kind { Rickshaw, Car, Bus, Truck }
 
     /// Optional behaviour override. After the vehicle's normal avoidance decides a desired speed/lateral,
     /// a brain (e.g. a rival bus that wants to camp a stop) may rewrite them — using the SAME road-relative
@@ -42,9 +42,11 @@ public class TrafficVehicle : MonoBehaviour
     public int dir = +1;           // +1 = same direction as the bus, -1 = oncoming/wrong-way
 
     public bool InUse { get; private set; }
-    public bool Knocked => _shoveT > 0f;   // mid-shove → skip the anti-stack separation pass
+    public bool Knocked => _shoveT > 0f;   // mid-shove (normal traffic skips the anti-stack pass while tumbling)
+    public bool Solid => _solid;           // rival bus — a solid obstacle; STILL separates from other vehicles
     public float HalfLen => _halfLen;
     public float HalfWidth => _halfWidth;
+    public float Cruise => _cruise;        // clear-road desired speed (a brain reads it to set aggression)
 
     /// Deterministic soft nudge of the logical position (used by TrafficSystem's anti-stack pass). Lateral
     /// is clamped to the drivable band so a nudge never pushes a vehicle off the road.
@@ -71,6 +73,10 @@ public class TrafficVehicle : MonoBehaviour
     public int busDamageOnHit = 8;
     [Tooltip("Enable this vehicle's collider only when within this many metres of the bus (cheap physics).")]
     public float colliderActiveRange = 35f;
+    [Tooltip("Beyond this distance (m) ahead/behind the bus, the vehicle's VISUAL is hidden (logic still runs).")]
+    public float lodVisibleRange = 230f;   // ~the smog edge, so a culled vehicle is never actually seen
+    bool _modelVisible = true;
+    Renderer[] _modelRenderers;     // cached on model build → LOD toggle without per-frame GetComponentsInChildren
     [Tooltip("How far the bus PUSHES the vehicle sideways on a hit (metres it slides away). Bigger = harder shove.")]
     public float shoveLateral = 2.6f;
     [Tooltip("How far back along the road the vehicle is pushed on a hit (metres).")]
@@ -97,6 +103,7 @@ public class TrafficVehicle : MonoBehaviour
     public float lookahead = 42f;      // how far ahead to sense (m) — bigger = reacts earlier/smarter
     public float scratchClearance = 0.5f;  // extra lateral room needed to commit to a squeeze (small = aggressive)
     float eagerness = 0.5f;            // 0..1 how hard it surges into open road (set by kind on Acquire)
+    float _massFactor = 0.65f;         // collision mass feel: <1 light (flung far, barely slows bus), >1 heavy
 
     public void Init(TiledRoadStreamer road)
     {
@@ -115,20 +122,28 @@ public class TrafficVehicle : MonoBehaviour
         _shoveT = 0f; _lastHitTime = -999f;     // reset shove state for the pooled reuse
         _offRoadFrames = 0;                      // fresh grace counter (anti-flicker)
         _pushLatVel = 0f; _pushBackVel = 0f;
+        _crossing = false;                       // not mid-cross on a fresh acquire
+        _modelVisible = true;                    // LOD re-evaluates on the new vehicle (renderers default on)
         SetSolid(false);                         // pooled vehicles start as normal (trigger) traffic
         _halfLen = size.z * 0.5f;
         _halfWidth = size.x * 0.5f;
-        // rickshaws are nimble + pushy (steer quick, surge into gaps); buses ponderous + calmer
+        // rickshaws are nimble + pushy (steer quick, surge into gaps); buses ponderous + calmer.
+        // _massFactor drives the collision FEEL: light things (rickshaw) get flung far + barely slow the bus;
+        // heavy things (bus) barely move + slow the bus more. Makes the push read as real mass.
         switch (k)
         {
-            case Kind.Rickshaw: _accel = 6f;   _brake = 9f;  _steerRate = 6.5f; eagerness = 0.8f; break;
-            case Kind.Bus:      _accel = 3.5f; _brake = 9f;  _steerRate = 3f;   eagerness = 0.3f; break;
-            default:            _accel = 7f;   _brake = 12f; _steerRate = 5f;   eagerness = 0.6f; break;
+            case Kind.Rickshaw: _accel = 6f;   _brake = 9f;  _steerRate = 6.5f; eagerness = 0.8f; _massFactor = 0.30f; break;
+            case Kind.Bus:      _accel = 3.5f; _brake = 9f;  _steerRate = 3f;   eagerness = 0.3f; _massFactor = 1.10f; break;
+            case Kind.Truck:    _accel = 4f;   _brake = 10f; _steerRate = 3.5f; eagerness = 0.35f; _massFactor = 0.95f; break;  // normal heavy-ish, not a wall
+            default:            _accel = 7f;   _brake = 12f; _steerRate = 5f;   eagerness = 0.6f; _massFactor = 0.65f; break;
         }
         InUse = true;
-        gameObject.SetActive(true);
         StyleModel(size, color);
+        // POSITION FIRST (while still INACTIVE), THEN reveal — activating before placing left the vehicle
+        // rendering one frame at its stale pooled spot (the faint "ghost"/flash on spawn). SyncToRoad writes the
+        // transform while inactive; spawn metres is always inside the loaded road so it samples fine. Then show.
         SyncToRoad();
+        gameObject.SetActive(true);
     }
 
     public void Release()
@@ -147,6 +162,17 @@ public class TrafficVehicle : MonoBehaviour
         {
             bool near = Mathf.Abs(metresFromBus) < colliderActiveRange;
             if (_collider != null && _collider.enabled != near) _collider.enabled = near;
+        }
+
+        // LOD: hide the VISUAL (not the logic) when far ahead/behind — keeps the sim running so traffic is in
+        // place when it comes into view, but skips drawing the dozens of distant vehicles (FPS at high density).
+        // Renderers are CACHED (set when the model is built) → no per-frame GetComponentsInChildren allocation.
+        bool visible = Mathf.Abs(metresFromBus) < lodVisibleRange;
+        if (_modelVisible != visible && _modelRenderers != null)
+        {
+            _modelVisible = visible;
+            for (int i = 0; i < _modelRenderers.Length; i++)
+                if (_modelRenderers[i] != null) _modelRenderers[i].enabled = visible;
         }
 
         // advance the hit PUSH: slide the vehicle along the ground in the shove direction, decaying to 0 over
@@ -172,9 +198,21 @@ public class TrafficVehicle : MonoBehaviour
         float rate = desiredSpeed < speed ? _brake : _accel;
         speed = Mathf.MoveTowards(speed, desiredSpeed, rate * dt);
 
-        _desiredLateral = ClampToBand(desiredLat);
-        lateral = Mathf.MoveTowards(lateral, _desiredLateral, _steerRate * dt);
-        lateral = ClampToBand(lateral);
+        if (_crossing)
+        {
+            // CROSSING the road from the oncoming lane to OUR side: ease lateral across the median (NO band clamp,
+            // so it can traverse), keep a steady crawl. When it reaches the target side, MERGE: flip dir so it
+            // joins our flow — a car/rickshaw that cut across. (Dhaka chaos; a hazard the player must dodge.)
+            lateral = Mathf.MoveTowards(lateral, _crossTarget, (_steerRate * 0.7f) * dt);
+            speed = Mathf.MoveTowards(speed, _cruise * 0.7f, _accel * dt);
+            if (Mathf.Abs(lateral - _crossTarget) < 0.3f) { dir = _crossNewDir; _crossing = false; lateral = ClampToBand(lateral); }
+        }
+        else
+        {
+            _desiredLateral = ClampToBand(desiredLat);
+            lateral = Mathf.MoveTowards(lateral, _desiredLateral, _steerRate * dt);
+            lateral = ClampToBand(lateral);
+        }
 
         float relative = dir * speed - busSpeed;
         metresFromBus += relative * dt;
@@ -334,7 +372,8 @@ public class TrafficVehicle : MonoBehaviour
         return mag * sideSign;
     }
 
-    int _offRoadFrames;   // consecutive frames SampleRoad failed — grace before we hide/recycle (anti-flicker)
+    int _offRoadFrames;        // consecutive frames SampleRoad failed
+    Vector3 _lastPos, _lastFwd; // last good pose, for smooth EXTRAPOLATION on a momentary miss (no freeze)
 
     bool SyncToRoad()
     {
@@ -343,41 +382,28 @@ public class TrafficVehicle : MonoBehaviour
         if (_road.SampleRoad(metresFromBus, lateral, out Vector3 pos, out Vector3 fwd, out Vector3 right))
         {
             _offRoadFrames = 0;
+            _lastPos = pos; _lastFwd = fwd;
             if (_model != null && !_model.gameObject.activeSelf) _model.gameObject.SetActive(true);
             transform.position = pos;
             Vector3 travel = fwd * dir;
-            if (travel.sqrMagnitude > 1e-6f)
-                transform.rotation = Quaternion.LookRotation(travel, Vector3.up);
-
-            // PUSH (no hop): a quick decaying shove offset on the model's local position in the hit direction —
-            // lateral away from the bus + a little back. Stays on the ground (no vertical jump). The permanent
-            // displacement is already in metres/lateral; this is just the visual settle.
-            if (_model != null)
-            {
-                float baseY = _model.localScale.y * 0.5f;
-                _model.localPosition = new Vector3(0f, baseY, 0f);
-            }
+            if (travel.sqrMagnitude > 1e-6f) transform.rotation = Quaternion.LookRotation(travel, Vector3.up);
+            // cube fallback is centre-pivoted → lift to sit on the ground; real models are already base-seated.
+            if (_model != null && _modelIsCube) _model.localPosition = new Vector3(0f, _model.localScale.y * 0.5f, 0f);
             return true;
         }
 
-        // SampleRoad failed THIS frame. Don't hide/recycle instantly — at the road's leading/trailing edge a
-        // single-frame miss is common and toggling SetActive(false) is exactly the "phase out for 2-3ms"
-        // flicker. Keep the model visible at its last pose; only report off-road after a short grace.
+        // SampleRoad missed THIS frame (a genuine 1-frame dip while tiles stream). HOLD the last good pose for a
+        // tiny grace — do NOT extrapolate-move (that phantom slide off the road was the "ghost"). After the grace
+        // it's genuinely off-road → recycle. With the bus-tracking fixed, mid-road misses are rare/transient.
         _offRoadFrames++;
-        return _offRoadFrames < 4;   // stay "on road" for a few grace frames so a momentary miss never flickers
+        if (_offRoadFrames >= 2) return false;            // really gone — let TrafficSystem recycle it
+        transform.position = _lastPos;                    // hold still (no phantom motion → no ghost)
+        return true;
     }
 
     void EnsureModel()
     {
-        if (_model != null) return;
-        // visual cube (no collider on the model — the collision box lives on the root)
-        var box = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        box.name = "Body";
-        var modelCol = box.GetComponent<Collider>();
-        if (modelCol != null) Destroy(modelCol);
-        _model = box.transform;
-        _model.SetParent(transform, false);
-
+        if (_collider != null) return;   // collider/body set up once; the VISUAL is (re)built per-kind in StyleModel
         // collision box TRIGGER on the root + kinematic Rigidbody so trigger events fire. Layer set so
         // traffic doesn't self-collide (configured by TrafficSystem); starts disabled (enabled near the bus).
         _collider = gameObject.AddComponent<BoxCollider>();
@@ -389,6 +415,23 @@ public class TrafficVehicle : MonoBehaviour
         _body.interpolation = RigidbodyInterpolation.None;
     }
 
+    // a procedural cube fallback when no real model is available for this kind (keeps the game working).
+    Transform MakeCube()
+    {
+        var box = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        box.name = "Body";
+        var modelCol = box.GetComponent<Collider>();
+        if (modelCol != null) Destroy(modelCol);
+        box.transform.SetParent(transform, false);
+        _modelIsCube = true;
+        return box.transform;
+    }
+
+    bool _modelIsCube;
+    TrafficVehicle.Kind _modelKind = (TrafficVehicle.Kind)(-1);   // which kind the current _model was built for
+    bool _modelIsRival;
+    Vector3 _lastSize = new Vector3(1.8f, 1.5f, 4.2f);            // last styled box size (for rival re-style)
+
     bool _solid;   // rivals: act as a SOLID obstacle — the bus physically BOUNCES BACK off them (manual
                    // knockback in code, reliable with the sphere physics) instead of passing through.
 
@@ -397,25 +440,58 @@ public class TrafficVehicle : MonoBehaviour
     /// trigger but ALWAYS enabled for a rival (so the overlap is detected wherever the player meets it).
     public void SetSolid(bool solid)
     {
+        bool changed = _solid != solid;
         _solid = solid;
         if (solid && _collider != null) _collider.enabled = true;
+        // a rival may want a distinct bus model — re-style if the solid/rival state changed and we have a model
+        if (changed && _model != null && InUse) RefreshModelForRival();
     }
 
     void StyleModel(Vector3 size, Color color)
     {
-        if (_model == null) EnsureModel();
-        _model.localScale = size;
-        _model.localPosition = new Vector3(0f, size.y * 0.5f, 0f);
+        EnsureModel();
+        _lastSize = size;
+
+        // the collision box is ALWAYS the gameplay source of truth (visual never affects handling)
         if (_collider != null) { _collider.size = size; _collider.center = new Vector3(0f, size.y * 0.5f, 0f); }
-        var r = _model.GetComponent<Renderer>();
-        if (r != null)
+
+        // (Re)build the VISUAL only when the kind/rival changed (pooled vehicles reuse across kinds). A real
+        // model from the library if available, else a coloured cube fallback.
+        bool wantRival = _solid;   // rivals are flagged solid before/after Acquire; refresh on the rival path too
+        if (_model == null || _modelKind != kind || _modelIsRival != wantRival)
         {
-            Shader sh = Shader.Find("Universal Render Pipeline/Lit"); if (sh == null) sh = Shader.Find("Standard");
-            if (r.sharedMaterial == null || r.sharedMaterial.shader != sh) r.material = new Material(sh);
-            if (r.material.HasProperty("_BaseColor")) r.material.SetColor("_BaseColor", color);
-            if (r.material.HasProperty("_Color")) r.material.SetColor("_Color", color);
+            if (_model != null) Destroy(_model.gameObject);
+            _model = null; _modelIsCube = false;
+
+            var lib = VehicleModelLibrary.Instance;
+            if (lib != null) _model = lib.CreateModel(kind, id, size, transform, wantRival);
+            if (_model == null) _model = MakeCube();
+
+            // cache the renderers ONCE (the model only changes here) → LOD toggles with no per-frame alloc
+            _modelRenderers = _model != null ? _model.GetComponentsInChildren<Renderer>(true) : null;
+            _modelVisible = true;   // freshly built models start visible; LOD re-evaluates next Tick
+
+            _modelKind = kind; _modelIsRival = wantRival;
         }
+
+        if (_modelIsCube)
+        {
+            _model.localScale = size;
+            _model.localPosition = new Vector3(0f, size.y * 0.5f, 0f);
+            var r = _model.GetComponent<Renderer>();
+            if (r != null)
+            {
+                Shader sh = Shader.Find("Universal Render Pipeline/Lit"); if (sh == null) sh = Shader.Find("Standard");
+                if (r.sharedMaterial == null || r.sharedMaterial.shader != sh) r.material = new Material(sh);
+                if (r.material.HasProperty("_BaseColor")) r.material.SetColor("_BaseColor", color);
+                if (r.material.HasProperty("_Color")) r.material.SetColor("_Color", color);
+            }
+        }
+        // real models are already fitted to `size` + base-seated by the library; nothing more to do.
     }
+
+    /// Rivals call this after SetSolid — re-style so the visual uses the rival-bus look if one is set.
+    public void RefreshModelForRival() => StyleModel(_lastSize, Color.white);
 
     // --- collision with the BUS (the bus's CollisionBox trigger overlaps us) ---
     // Normal traffic → shoved aside. Rival buses (_solid) → the bus is KNOCKED BACK every overlapping frame
@@ -430,6 +506,10 @@ public class TrafficVehicle : MonoBehaviour
         bool isBus = other.GetComponentInParent<BusTag>() != null
                   || (other.attachedRigidbody != null && other.attachedRigidbody == bus.sphere);
         if (!isBus) return;
+        // MULTIPLAYER: on a CONDUCTOR client the bus is a PROXY (interpolated from the driver's broadcast). The
+        // driver is authoritative for the bus's motion/health, so traffic here must NOT knock or damage it — just
+        // let the local vehicle shove off it cosmetically (no bus effect). The driver's client does the real hit.
+        bool busAuthoritative = !bus.ProxyMode;
 
         float busLat = _road != null ? _road.BusLateral : (lateral - 1f);
         float side = Mathf.Sign(lateral - busLat); if (side == 0f) side = 1f;
@@ -437,33 +517,67 @@ public class TrafficVehicle : MonoBehaviour
 
         if (_solid)
         {
-            // RIVAL BUS = solid clash. Push BOTH apart EVERY frame they overlap (no cooldown) so the bus can
-            // never drive through/over it — like pressing against a real bus. Damage still respects the cooldown.
+            // RIVAL BUS = a HEAVY but PUSHABLE clash (mutual). The harder you drive INTO it, the more YOU get
+            // shoved back AND the more the rival gets shoved FORWARD — so you can bully it down the road, it just
+            // resists and shoves you too (heavier, so it wins a standoff). Continuous press (hard=false: no
+            // speed-zero / no shake spam); a real IMPACT (damage + shake) fires once per cooldown.
             Vector3 awayFromRival = bus.transform.position - transform.position; awayFromRival.y = 0f;
-            bus.Knockback(awayFromRival, rivalBounce * hitBoost);           // bounce the bus back, continuously
-            _pushLatVel  = side * shoveLateral * 1.6f * hitBoost / Mathf.Max(0.1f, shoveTime);
-            _pushBackVel = -dir * shoveBack * 1.4f * hitBoost / Mathf.Max(0.1f, shoveTime);
-            _desiredLateral = ClampToBand(lateral + side * shoveLateral * 1.6f * hitBoost);
-            speed = Mathf.Max(0f, speed * 0.2f);
+            bool impact = Time.time - _lastHitTime >= hitCooldown;
+            // how fast is the bus driving INTO the rival right now? scales the mutual push.
+            float intoSpeed = bus.sphere != null ? Mathf.Max(0f, Vector3.Dot(bus.sphere.linearVelocity, -awayFromRival.normalized)) : Mathf.Abs(bus.SpeedMps);
+            // bounce the bus back only PARTIALLY (so it can still make headway and push the rival), scaled by how
+            // hard it's pressing — a gentle lean barely bounces, a full ram bounces more but never fully stops you.
+            if (busAuthoritative) bus.Knockback(awayFromRival, Mathf.Min(rivalBounce, 2f + intoSpeed * 0.45f), impact);
+            // the rival is SHOVED FORWARD proportional to how hard you ram it → you can move it down the road.
+            float ramForward = Mathf.Clamp(intoSpeed, 0f, 12f) * 0.18f;     // m/s the rival is pushed along the road
+            _pushLatVel  = side * shoveLateral * 0.6f * hitBoost / Mathf.Max(0.1f, shoveTime);
+            _pushBackVel = (dir * ramForward + (-dir * shoveBack * 0.4f)) / Mathf.Max(0.1f, shoveTime);  // forward shove
+            _desiredLateral = ClampToBand(lateral + side * shoveLateral * 0.6f * hitBoost);
+            speed = Mathf.Max(speed * 0.7f, ramForward);    // keep some of the rammed momentum
             _shoveT = 1f;
-            if (Time.time - _lastHitTime >= hitCooldown)                    // damage only once per cooldown
-            { _lastHitTime = Time.time; if (ShiftManager.Instance != null) ShiftManager.Instance.Damage(busDamageOnHit); }
+            if (impact)
+            { _lastHitTime = Time.time; if (busAuthoritative && ShiftManager.Instance != null) ShiftManager.Instance.Damage(busDamageOnHit); }
             return;
         }
 
         if (Time.time - _lastHitTime < hitCooldown) return;
         _lastHitTime = Time.time;
-        if (ShiftManager.Instance != null) ShiftManager.Instance.Damage(busDamageOnHit);
-        bus.ApplyImpact(busSpeedAfterHit);
 
-        // NORMAL traffic PUSH (not a jump): the vehicle is shoved away and SLIDES along the ground, decaying
-        // over ~shoveTime. A decaying push velocity integrated into lateral/metres each frame → real-shove feel.
-        _pushLatVel  = side * shoveLateral * hitBoost / Mathf.Max(0.1f, shoveTime);   // m/s sideways, decays
-        _pushBackVel = -dir * shoveBack * hitBoost / Mathf.Max(0.1f, shoveTime);      // m/s backward, decays
-        _desiredLateral = ClampToBand(lateral + side * shoveLateral * hitBoost);      // don't steer back yet
-        speed = Mathf.Max(0f, speed * 0.3f);            // jolted — loses most of its drive speed momentarily
-        _shoveT = 1f;                                   // drives the decay of the push velocity
+        // NORMAL traffic PUSH — mass-based feel. Light vehicles (rickshaw) get FLUNG and barely slow the bus;
+        // heavier ones (a traffic bus) move little and slow the bus more. invMass scales how far it's shoved;
+        // the bus keeps MORE speed against light things (busSpeedAfterHit raised by 1/mass).
+        float invMass = Mathf.Clamp(0.65f / Mathf.Max(0.15f, _massFactor), 0.4f, 2.2f);
+        if (busAuthoritative)
+        {
+            if (ShiftManager.Instance != null) ShiftManager.Instance.Damage(Mathf.RoundToInt(busDamageOnHit * _massFactor));
+            bus.ApplyImpact(Mathf.Clamp01(busSpeedAfterHit + 0.25f * (invMass - 1f)));   // light → keep more speed
+        }
+
+        _pushLatVel  = side * shoveLateral * hitBoost * invMass / Mathf.Max(0.1f, shoveTime);   // light → flung far
+        _pushBackVel = -dir * shoveBack * hitBoost * invMass / Mathf.Max(0.1f, shoveTime);
+        _desiredLateral = ClampToBand(lateral + side * shoveLateral * hitBoost * invMass);
+        speed = Mathf.Max(0f, speed * 0.3f);
+        _shoveT = 1f;
     }
 
     float _pushLatVel, _pushBackVel;   // hit-push velocities (m/s), decay to 0 over the shove
+
+    // --- lane CROSSING (oncoming → our side, then merge). Started by TrafficSystem (deterministic RNG). ---
+    bool _crossing;
+    float _crossTarget;     // target lateral (our side's drive band centre)
+    int _crossNewDir;       // dir to flip to once across (merges into our flow)
+    public bool Crossing => _crossing;
+
+    /// Begin crossing the road to the OPPOSITE side's drive lane, then merge into that direction. Only sensible
+    /// for an oncoming (dir -1) small vehicle; TrafficSystem gates who/when.
+    public void BeginCross()
+    {
+        RoadZone z = _road != null ? _road.Zone : null;
+        if (z == null || _crossing) return;
+        _crossNewDir = -dir;                                   // flip to the other flow when across
+        bool newForward = _crossNewDir > 0;
+        float sideSign = (newForward == z.leftHandTraffic) ? -1f : 1f;
+        _crossTarget = sideSign * Mathf.Lerp(z.MedianHalf + _halfWidth, z.DriveHalf - _halfWidth, 0.5f);  // mid of our band
+        _crossing = true;
+    }
 }

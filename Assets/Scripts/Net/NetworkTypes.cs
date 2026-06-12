@@ -57,4 +57,15 @@ namespace BamePlastic.Net
         public string hostName;
         public int humans;           // humans in the room (of 3)
     }
+
+    /// Fired when a player drops MID-SHIFT and the driver authority fails over. `newDriverName` is whoever now
+    /// holds the driver seat; `promotedFromRole` is the role they were promoted FROM (so a client can tell if it
+    /// is itself the new driver: its own previous role == promotedFromRole). -1/empty = no driver reassignment
+    /// (a conductor left; the driver carries on).
+    [Serializable]
+    public struct RoleReassign
+    {
+        public string newDriverName;
+        public int promotedFromRole;     // 1 = Conductor1, 2 = Conductor2, -1 = none (conductor drop)
+    }
 }

@@ -8,15 +8,19 @@ using BamePlastic.Net;
 /// PLAY-ONLY (created by MenuMode only in play) — no [ExecuteAlways], so no edit-mode duplicate canvases.
 public class MenuController : MonoBehaviour
 {
-    public enum Screen { Title, Lobby, Settings }
+    public enum Screen { Auth, Title, Lobby, Settings, Store, Leaderboard }
 
     [Tooltip("The screen shown first.")]
     public Screen startScreen = Screen.Title;
 
     Canvas _canvas;
+    AuthScreen _auth;
     MainMenuScreen _title;
     LobbyScreen _lobby;
     SettingsScreen _settings;
+    StoreScreen _store;
+    LeaderboardScreen _leaderboard;
+    WalletBar _wallet;
     Screen _current = Screen.Title;
 
     INetworkService _editNet;   // throwaway stub for edit-mode preview (no SessionContext side effects)
@@ -30,9 +34,12 @@ public class MenuController : MonoBehaviour
             SessionContext.Ensure();
             SessionContext.Instance.Net.LocalPlayerName = SettingsStore.PlayerName;
             SettingsStore.ApplyAll();
+            PlayerAccount.RestoreSession();
+            if (PlayerAccount.LoggedIn) PlayerAccount.Refresh();   // re-pull wallet/unlocks for a restored session
         }
         Build();
-        Show(startScreen);
+        // gate on login: a fresh player must sign in (or pick guest) before the title
+        Show(Application.isPlaying && !PlayerAccount.LoggedIn ? Screen.Auth : startScreen);
     }
 
     void Build()
@@ -45,23 +52,50 @@ public class MenuController : MonoBehaviour
         _canvas = PixelUI.Canvas(transform, "MenuCanvas", 50);   // high sort order: draws over the world/HUD
 
         // NO backdrop, NO scrim — the living game world shows through cleanly behind the menu.
+        _auth = new AuthScreen(_canvas.transform, this);
         _title = new MainMenuScreen(_canvas.transform, this);
         _lobby = new LobbyScreen(_canvas.transform, this, Net);
         _settings = new SettingsScreen(_canvas.transform, this);
+        _store = new StoreScreen(_canvas.transform, this);
+        _leaderboard = new LeaderboardScreen(_canvas.transform, this);
+        // top-right wallet (Bhara + "+") — visible on the Title screen; "+" opens the store on the GET BHARA tab
+        _wallet = new WalletBar(_canvas.transform, OpenStore);
     }
 
     public void Show(Screen s)
     {
         _current = s;
+        _auth?.SetVisible(s == Screen.Auth);
         _title?.SetVisible(s == Screen.Title);
         _lobby?.SetVisible(s == Screen.Lobby);
         _settings?.SetVisible(s == Screen.Settings);
+        _store?.SetVisible(s == Screen.Store);
+        _leaderboard?.SetVisible(s == Screen.Leaderboard);
+        // wallet rides along the Title + Store screens only
+        _wallet?.SetVisible(s == Screen.Title || s == Screen.Store);
         if (s == Screen.Lobby) _lobby?.OnShown();
 
         // crew are only clickable role-pickers while IN the lobby; elsewhere they're just scenery
         var mm = _menuMode;
         if (mm != null) foreach (var c in mm.Crew) if (c != null) c.SetInteractable(s == Screen.Lobby);
     }
+
+    /// Called by AuthScreen on a successful login/signup (or guest) — sync the player name and enter the title.
+    public void OnAuthSuccess()
+    {
+        if (PlayerAccount.LoggedIn)
+        {
+            SettingsStore.PlayerName = PlayerAccount.Username;
+            if (SessionContext.Instance != null) SessionContext.Instance.Net.LocalPlayerName = PlayerAccount.Username;
+            PlayerAccount.ClaimDailyBonus();   // grant the once-a-day Bhara (the WalletBar shows the toast)
+        }
+        Show(Screen.Title);
+    }
+
+    public void OpenStore() => Show(Screen.Store);
+    public void OpenLeaderboard() => Show(Screen.Leaderboard);
+
+    public void Logout() { PlayerAccount.Logout(); Show(Screen.Auth); }
 
     MenuMode _menuMode;   // set when this menu lives in the game scene (living backdrop); drives transitions
 

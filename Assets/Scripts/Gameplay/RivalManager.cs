@@ -17,6 +17,7 @@ public class RivalManager : MonoBehaviour
     {
         new RivalDef { name = "Sonar Bangla",  color = new Color(0.85f, 0.2f, 0.25f) },
         new RivalDef { name = "Dhaka Express",  color = new Color(0.2f, 0.45f, 0.9f) },
+        new RivalDef { name = "Bismillah",      color = new Color(0.95f, 0.7f, 0.15f) },
     };
 
     TrafficSystem _traffic;

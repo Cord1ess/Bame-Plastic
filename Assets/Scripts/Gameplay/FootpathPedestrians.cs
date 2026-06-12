@@ -14,7 +14,7 @@ public class FootpathPedestrians : MonoBehaviour
     public static FootpathPedestrians Instance { get; private set; }
     [Header("Population")]
     [Tooltip("How many pedestrians stroll EACH footpath at once (both sides → ~2x this total).")]
-    public int maxWalkersPerSide = 20;
+    public int maxWalkersPerSide = 38;
     [Tooltip("Spawn no closer than this far ahead of the bus (m). Keep BEYOND the visible-ahead range so " +
              "walkers are already there when they come into view — never seen popping in.")]
     public float spawnMinAhead = 75f;
@@ -34,6 +34,11 @@ public class FootpathPedestrians : MonoBehaviour
     public int baseFare = 20;
     public int fareVariance = 15;
 
+    [Header("Board off the street")]
+    [Tooltip("When the bus is stopped/slow, a player-side walker within this distance (m) of the door boards " +
+             "directly — pick people up anywhere, not just at stops.")]
+    public float boardWhenStoppedRange = 6f;
+
     class Walker
     {
         public Passenger p;
@@ -42,7 +47,27 @@ public class FootpathPedestrians : MonoBehaviour
         public float speed;
         public int dir;            // +1 same way as bus, -1 toward the bus
         public int side;           // +1 = player/forward footpath (joins stops), -1 = far footpath (ambience)
+        public float homeLateral;  // the footpath lateral they DRIFT back to when no bus/car is near
+        public bool crossing;      // mid road-crossing to the other footpath
+        public float crossTargetLat;   // the far footpath lateral we're crossing toward
+        public float crossCooldown;    // seconds until this walker may consider crossing again
     }
+
+    [Header("Avoidance + crossing")]
+    [Tooltip("Peds steer away when the bus/a car comes within this distance (m). They can NEVER be overlapped — " +
+             "a hard push-out keeps them out of the bus/car footprint.")]
+    public float avoidRadius = 1.5f;
+    [Tooltip("How hard the bus/car push moves the walker out (higher = shoved away faster). The push moves their " +
+             "ACTUAL position — it does NOT spring back.")]
+    public float dodgeLerp = 0.2f;
+    [Tooltip("How fast a walker drifts back toward their footpath once nothing is near (gentle return, no snap).")]
+    public float returnSpeed = 0.5f;
+    [Tooltip("Chance per second a footpath walker decides to cross the road to the other side.")]
+    [Range(0f, 0.2f)] public float crossChancePerSec = 0.004f;   // far fewer road crossings
+    [Tooltip("Crossing speed (m/s laterally) — a brisk walk across the road.")]
+    public float crossSpeed = 2.4f;
+    [Tooltip("Min seconds between a walker's crossings.")]
+    public float crossCooldownSec = 20f;
 
     TiledRoadStreamer _road;
     RoadZone _zone;
@@ -50,6 +75,7 @@ public class FootpathPedestrians : MonoBehaviour
     readonly List<Walker> _live = new List<Walker>();
     readonly Stack<Walker> _free = new Stack<Walker>();
     bool _ready;
+    bool _seeded;   // did the one-time full-span initial fill (incl. beside the bus)
 
     void Awake() { Instance = this; _road = GetComponent<TiledRoadStreamer>(); _zone = GetComponent<RoadZone>(); }
 
@@ -69,6 +95,7 @@ public class FootpathPedestrians : MonoBehaviour
         float metresAtBus = 1.5f;                        // just ahead of the door
         w.metres = metresAtBus;
         w.lateral = FootpathLateral(side) + Random.Range(-lateralWander, lateralWander);
+        w.homeLateral = w.lateral;
         w.dir = +1;                                      // walk along with traffic, away from the bus
         w.speed = Random.Range(walkSpeed.x, walkSpeed.y);
 
@@ -113,11 +140,65 @@ public class FootpathPedestrians : MonoBehaviour
             w.metres += (w.dir * w.speed - busSpeed) * dt;
             if (w.metres < -cullBehind || w.metres > ahead + 5f) { Recycle(i, true); continue; }
 
+            if (w.crossCooldown > 0f) w.crossCooldown -= dt;
+
+            // CROSSING: ease the walker's base lateral across the road toward the far footpath, but ONLY while the
+            // path at the road centre is clear of the bus + cars (else pause mid-stride — never walk into them).
+            if (w.crossing)
+            {
+                if (CrossingClear(w.metres))
+                {
+                    w.lateral = Mathf.MoveTowards(w.lateral, w.crossTargetLat, crossSpeed * dt);
+                    if (Mathf.Approximately(w.lateral, w.crossTargetLat))
+                    {
+                        w.crossing = false; w.side = -w.side; w.crossCooldown = crossCooldownSec;   // arrived
+                        w.homeLateral = w.crossTargetLat;   // their footpath is now the far side
+                    }
+                }
+                // else: blocked — hold position this frame (wait for the gap)
+            }
+            else if (w.crossCooldown <= 0f && Random.value < crossChancePerSec * dt)
+            {
+                // decide to cross: target the opposite footpath's lateral
+                w.crossTargetLat = FootpathLateral(-w.side);
+                w.crossing = true;
+            }
+
+            // AVOIDANCE: push the walker's ACTUAL lateral away from the bus/cars (NOT a temporary offset that
+            // springs back — that was fighting a continuous push and snapping them through the bus). The push
+            // PERMANENTLY moves `w.lateral`; when nothing is near, they DRIFT slowly back toward their footpath.
+            float push = AvoidanceOffset(w.metres, w.lateral);
+            if (Mathf.Abs(push) > 0.001f)
+                w.lateral += push * dodgeLerp * dt;                       // shoved out, and it STAYS
+            else if (!w.crossing)
+                w.lateral = Mathf.MoveTowards(w.lateral, w.homeLateral, returnSpeed * dt);  // clear → ease home
+
             if (_road.SampleRoad(w.metres, w.lateral, out Vector3 pos, out Vector3 fwd, out _))
             {
+                // HARD PUSH-OUT: if despite steering the walker is still inside the bus/car footprint, shove them
+                // clear THIS frame so nothing can ever overlap/run them over. FEED IT BACK into w.lateral so the
+                // shove persists (no spring-back) and converts the world push to a lateral the walker keeps.
+                Vector3 cleared = HardPushOut(pos);
+                if ((cleared - pos).sqrMagnitude > 1e-6f)
+                {
+                    if (_road.SampleRoad(w.metres, 0f, out Vector3 mid, out _, out Vector3 right))
+                    { Vector3 d = cleared - mid; d.y = 0f; w.lateral = Vector3.Dot(d, right); }
+                    pos = cleared;
+                }
                 w.p.transform.position = pos;
-                Vector3 face = fwd * w.dir; face.y = 0f;
+                Vector3 face = (w.crossing ? CrossFacing(w) : fwd * w.dir); face.y = 0f;
                 if (face.sqrMagnitude > 1e-5f) w.p.transform.rotation = Quaternion.LookRotation(face, Vector3.up);
+
+                // BOARD WHEN STOPPED ANYWHERE: if the bus is pulled up (slow) and this player-side walker is near
+                // the door, they hop on directly — you can pick people up off the street, not only at stops.
+                BusPassengers bp = BusPassengers.Instance;
+                if (w.side > 0 && bp != null && bp.CanBoard &&
+                    (pos - bp.DoorPosition).sqrMagnitude < boardWhenStoppedRange * boardWhenStoppedRange)
+                {
+                    w.p.ResetWaiting(baseFare, Color.grey);   // becomes a fare
+                    w.p.BeginBoarding(bp);                     // → queues at the door, threads the aisle
+                    Recycle(i, false); continue;               // the bus owns it now
+                }
 
                 // Only PLAYER-SIDE walkers (side +1) join stops as fares — the far footpath is ambience.
                 if (w.side > 0 && SplineStopSpawner.Instance != null &&
@@ -126,7 +207,21 @@ public class FootpathPedestrians : MonoBehaviour
             }
         }
 
-        // top up BOTH footpaths to maxWalkersPerSide each
+        // ONE-TIME SEED: once the road is ready, fill the WHOLE visible footpath span — incl. BESIDE and just
+        // behind the bus (the bus sits mid-street, so its left/right must already be peopled at start, not empty).
+        // Ongoing top-ups below stay ahead-only (so new arrivals aren't seen popping in).
+        if (!_seeded && ahead > spawnMinAhead)
+        {
+            int total0 = maxWalkersPerSide * 2, guard0 = 0;
+            while (_live.Count < total0 && guard0++ < total0 * 2)
+            {
+                int side = CountSide(+1) <= CountSide(-1) ? +1 : -1;
+                if (!Spawn(side, -cullBehind + 2f, Mathf.Min(spawnMaxAhead, ahead))) break;
+            }
+            _seeded = true;
+        }
+
+        // top up BOTH footpaths to maxWalkersPerSide each (ahead-only, so they're never seen appearing)
         int total = maxWalkersPerSide * 2;
         int guard = 0;
         while (_live.Count < total && guard++ < total)
@@ -145,9 +240,109 @@ public class FootpathPedestrians : MonoBehaviour
         return n;
     }
 
-    bool Spawn(float ahead, int side)
+    // ---- AVOIDANCE: peds steer away from the bus + cars; a hard push-out guarantees no overlap ----
+
+    // desired LATERAL dodge (m, signed) at a walker spot: if the bus/a car is near, push toward the nearer kerb.
+    float AvoidanceOffset(float metres, float lateral)
     {
-        if (ahead <= spawnMinAhead + 2f) return false;
+        if (!_road.SampleRoad(metres, lateral, out Vector3 here, out _, out Vector3 right)) return 0f;
+        Vector3 push = Vector3.zero;
+
+        // the bus
+        var bus = BusController.Instance;
+        if (bus != null) AccumPush(ref push, here, bus.transform.position, BusAvoidRadius(bus));
+        // cars
+        var traffic = TrafficSystem.Instance;
+        if (traffic != null)
+        {
+            var live = traffic.Live;
+            for (int i = 0; i < live.Count; i++)
+            {
+                var v = live[i]; if (v == null) continue;
+                AccumPush(ref push, here, v.transform.position, avoidRadius + v.HalfWidth);
+            }
+        }
+        if (push.sqrMagnitude < 1e-5f) return 0f;
+        // project the world push onto the road's lateral (right) axis → a signed lateral dodge
+        push.y = 0f;
+        return Vector3.Dot(push, right);
+    }
+
+    static void AccumPush(ref Vector3 push, Vector3 here, Vector3 obstacle, float radius)
+    {
+        Vector3 d = here - obstacle; d.y = 0f;
+        float dist = d.magnitude;
+        if (dist > radius || dist < 1e-4f) { if (dist < 1e-4f) push += Vector3.right * radius; return; }
+        push += d.normalized * (radius - dist);   // stronger the closer they are
+    }
+
+    // hard push-out in WORLD space: if a walker ended up inside the bus/car footprint, shove them just outside it.
+    Vector3 HardPushOut(Vector3 pos)
+    {
+        var bus = BusController.Instance;
+        if (bus != null) pos = PushOutOf(pos, bus.transform.position, BusAvoidRadius(bus) * 0.8f);
+        var traffic = TrafficSystem.Instance;
+        if (traffic != null)
+        {
+            var live = traffic.Live;
+            for (int i = 0; i < live.Count; i++)
+            {
+                var v = live[i]; if (v == null) continue;
+                pos = PushOutOf(pos, v.transform.position, (v.HalfWidth + 0.6f));
+            }
+        }
+        return pos;
+    }
+
+    static Vector3 PushOutOf(Vector3 pos, Vector3 centre, float minDist)
+    {
+        Vector3 d = pos - centre; d.y = 0f;
+        float dist = d.magnitude;
+        if (dist >= minDist) return pos;
+        Vector3 dir = dist > 1e-4f ? d.normalized : Vector3.right;
+        Vector3 outp = centre + dir * minDist;
+        return new Vector3(outp.x, pos.y, outp.z);   // keep the walker's own Y (footpath height)
+    }
+
+    float BusAvoidRadius(BusController bus)
+    {
+        float half = bus.collisionBoxSize != Vector3.zero
+            ? Mathf.Max(bus.collisionBoxSize.x, bus.collisionBoxSize.z) * 0.5f : 1.4f;
+        return avoidRadius + half;
+    }
+
+    // crossing is clear if no bus/car is near the road-centre point at this arc-length (so peds wait for a gap).
+    bool CrossingClear(float metres)
+    {
+        if (!_road.SampleRoad(metres, 0f, out Vector3 mid, out _, out _)) return false;
+        var bus = BusController.Instance;
+        if (bus != null && (bus.transform.position - mid).sqrMagnitude < 64f) return false;   // bus within 8m
+        var traffic = TrafficSystem.Instance;
+        if (traffic != null)
+        {
+            var live = traffic.Live;
+            for (int i = 0; i < live.Count; i++)
+            {
+                var v = live[i]; if (v == null) continue;
+                if ((v.transform.position - mid).sqrMagnitude < 36f) return false;             // a car within 6m
+            }
+        }
+        return true;
+    }
+
+    Vector3 CrossFacing(Walker w)
+    {
+        if (!_road.SampleRoad(w.metres, w.lateral, out _, out _, out Vector3 right)) return Vector3.forward;
+        return (w.crossTargetLat > w.lateral ? right : -right);   // face the way they're crossing
+    }
+
+    bool Spawn(float ahead, int side) => Spawn(side, spawnMinAhead, Mathf.Min(spawnMaxAhead, ahead));
+
+    // spawn one walker at a random metres in [minM, maxM]. Ongoing top-ups use spawnMinAhead.. (so new walkers
+    // aren't seen popping in); the one-time INITIAL seed uses the full visible span incl. BESIDE/behind the bus.
+    bool Spawn(int side, float minM, float maxM)
+    {
+        if (maxM <= minM + 2f) return false;
         if (CountSide(side) >= maxWalkersPerSide) return false;
         Passenger p = PassengerPool.Instance.Take();
         if (p == null) return false;                  // pool drained — fine, fewer walkers
@@ -155,8 +350,9 @@ public class FootpathPedestrians : MonoBehaviour
         Walker w = _free.Count > 0 ? _free.Pop() : new Walker();
         w.p = p;
         w.side = side;
-        w.metres = Random.Range(spawnMinAhead, Mathf.Min(spawnMaxAhead, ahead));
+        w.metres = Random.Range(minM, maxM);
         w.lateral = FootpathLateral(side) + Random.Range(-lateralWander, lateralWander);
+        w.homeLateral = w.lateral;
         w.dir = Random.value < sameWayChance ? +1 : -1;
         w.speed = Random.Range(walkSpeed.x, walkSpeed.y);
 

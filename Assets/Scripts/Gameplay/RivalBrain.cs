@@ -1,35 +1,48 @@
 using UnityEngine;
 
-/// L4 — the competitive RIVAL behaviour, layered on a normal TrafficVehicle via IVehicleBrain. The vehicle
-/// itself does all the driving (road-relative motion, curve-following, collision, band-clamping) exactly
-/// like ambient traffic — this brain only adds INTENT: seek a bus stop ahead, camp it to STEAL the waiting
-/// passengers (real taka into its ShiftManager standings entry), leave when loaded, and drift to block the
-/// player. Because it reuses the traffic vehicle, it can never "go all over the place" — it lives in the
-/// same deterministic road space as every other vehicle.
+/// L4 — the competitive RIVAL behaviour, layered on a normal TrafficVehicle via IVehicleBrain. The vehicle does
+/// all the driving (road-relative motion, curve-following, collision, band-clamping) exactly like ambient
+/// traffic; this brain only adds INTENT:
+///   • seek the nearest bus stop ahead with waiting passengers,
+///   • QUEUE one-behind-another with the other rivals camping that stop (a convoy lined up at the kerb trying to
+///     scoop the crowd), only the FRONT rival grabbing, the rest crawling in line,
+///   • grab the waiting passengers (real taka into its ShiftManager standings), leave when loaded → the next
+///     advances,
+///   • aggressively BLOCK/overtake the player (drift into your lane, sit in front, run a bit faster).
+/// Because it reuses the traffic vehicle it can never "go all over the place" — same deterministic road space.
 public class RivalBrain : MonoBehaviour, TrafficVehicle.IVehicleBrain
 {
-    enum State { Cruise, SeekStop, Camp, Leaving }
+    enum State { Cruise, Approach, Camp, Leaving }
 
     [Header("Identity")]
     public string rivalName = "Sonar Bangla";
 
     [Header("Compete")]
     [Tooltip("Look this far ahead (m, along the road) for a stop to camp.")]
-    public float stopSeekRange = 70f;
-    [Tooltip("World distance (m) to the stop at which it pulls in and starts grabbing passengers.")]
+    public float stopSeekRange = 90f;
+    [Tooltip("World distance (m) from the stop the FRONT rival pulls in at to grab passengers.")]
     public float campDistance = 7f;
-    [Tooltip("Passengers grabbed per second while camping.")]
+    [Tooltip("Spacing (m) between queued rivals lined up behind the stop — about a bus length.")]
+    public float queueSpacing = 11f;
+    [Tooltip("Passengers grabbed per second while camping (front rival only).")]
     public float grabRate = 4f;
-    [Tooltip("Leave once it has grabbed at least this many (then drives off, freeing the stop).")]
+    [Tooltip("Leave once it has grabbed at least this many (then drives off, freeing the slot).")]
     public int leaveAfter = 8;
     [Tooltip("Max seconds it will camp before leaving regardless.")]
     public float maxCampTime = 5f;
-    [Tooltip("Crawl speed (m/s) while approaching/leaving a stop.")]
+    [Tooltip("Crawl speed (m/s) while approaching / waiting in the queue.")]
     public float approachSpeed = 4f;
 
-    [Header("Block the player")]
-    [Tooltip("If the player is just behind and close (m), drift toward the player's lane to block.")]
-    public float blockRange = 14f;
+    [Header("Aggression")]
+    [Tooltip("If the player is just ahead/behind within this many m, drift into their lane to block + overtake.")]
+    public float blockRange = 24f;
+    [Tooltip("Cruise SPEED MULTIPLIER vs its base — >1 so rivals keep up / overtake the player (annoying).")]
+    public float aggressionSpeedMul = 1.25f;
+
+    // --- queue state exposed so other rivals can line up behind me ---
+    public bool Targeting { get; private set; }
+    public Vector3 TargetStopPos { get; private set; }
+    public float DistToStop { get; private set; }
 
     RivalBus _standing;
     State _state = State.Cruise;
@@ -58,30 +71,45 @@ public class RivalBrain : MonoBehaviour, TrafficVehicle.IVehicleBrain
         if (road == null) return;
         if (_standing == null) LinkStanding();
 
+        Targeting = _state != State.Cruise;
+        TargetStopPos = _stopPos;
+        DistToStop = _haveStop ? Vector3.Distance(self.transform.position, _stopPos) : 9999f;
+
         switch (_state)
         {
             case State.Cruise:
-                MaybeBlockPlayer(self, road, ref desiredLat);
-                // hunt for a stop ahead with waiting passengers (only forward-running rivals camp)
+                desiredSpeed = Mathf.Max(desiredSpeed, self.Cruise * aggressionSpeedMul);   // run hot — overtake
+                MaybeBlockPlayer(self, road, ref desiredSpeed, ref desiredLat);
                 if (self.dir > 0 && SplineStopSpawner.Instance != null &&
                     SplineStopSpawner.Instance.TryGetStopAhead(self.transform.position, self.transform.forward,
                                                                stopSeekRange, out _stopPos, out int waiting) && waiting > 0)
-                { _haveStop = true; _state = State.SeekStop; }
+                { _haveStop = true; _state = State.Approach; }
                 break;
 
-            case State.SeekStop:
+            case State.Approach:
             {
-                if (!RefreshStop(self)) { _state = State.Cruise; break; }
-                desiredLat = KerbLateral(road);                            // ease toward the footpath lane
+                if (!RefreshStop(self)) { _state = State.Cruise; _haveStop = false; break; }
+                desiredLat = KerbLateral(road);                                  // ease toward the footpath lane
+
+                int slot = QueueIndex(self);                                     // 0 = front (camps); 1,2.. = behind
+                float slotDist = campDistance + slot * queueSpacing;            // pull up THIS far back → lined up
                 float d = Vector3.Distance(self.transform.position, _stopPos);
-                desiredSpeed = Mathf.Min(desiredSpeed, Mathf.Lerp(approachSpeed, desiredSpeed, Mathf.InverseLerp(campDistance, stopSeekRange, d)));
-                if (d <= campDistance) { _state = State.Camp; _campTimer = 0f; _grabbed = 0; _grabAccum = 0f; }
+
+                // crawl as we close on our slot; gun it if we're still far back in the queue
+                float t = Mathf.InverseLerp(slotDist, stopSeekRange, d);
+                desiredSpeed = Mathf.Min(desiredSpeed, Mathf.Lerp(approachSpeed, self.Cruise, t));
+
+                if (d <= slotDist + 1.5f)
+                {
+                    if (slot == 0) { _state = State.Camp; _campTimer = 0f; _grabbed = 0; _grabAccum = 0f; }
+                    else desiredSpeed = 0f;                                      // hold our place in line (crawl/stop)
+                }
                 break;
             }
 
             case State.Camp:
             {
-                desiredSpeed = 0f;                                          // pulled up at the kerb
+                desiredSpeed = 0f;                                              // pulled up at the kerb
                 desiredLat = KerbLateral(road);
                 _campTimer += dt;
                 _grabAccum += grabRate * dt;
@@ -98,11 +126,29 @@ public class RivalBrain : MonoBehaviour, TrafficVehicle.IVehicleBrain
             }
 
             case State.Leaving:
-                // accelerate back to traffic flow; once moving, hand control back to normal cruising
-                desiredSpeed = Mathf.Max(desiredSpeed, approachSpeed + 2f);
+                desiredSpeed = Mathf.Max(desiredSpeed, approachSpeed + 3f);     // pull away, free the slot
                 if (self.speed > approachSpeed) { _haveStop = false; _state = State.Cruise; }
                 break;
         }
+    }
+
+    // my position in the queue for this stop: how many OTHER rivals target the SAME stop and are CLOSER to it.
+    int QueueIndex(TrafficVehicle self)
+    {
+        var ts = TrafficSystem.Instance;
+        if (ts == null) return 0;
+        int idx = 0;
+        var rivals = ts.Rivals;
+        for (int i = 0; i < rivals.Count; i++)
+        {
+            var v = rivals[i];
+            if (v == null || v == self) continue;
+            var b = v.GetComponent<RivalBrain>();
+            if (b == null || b == this || !b.Targeting) continue;
+            if ((b.TargetStopPos - _stopPos).sqrMagnitude > 64f) continue;      // a different stop (>8m apart)
+            if (b.DistToStop < DistToStop - 0.5f) idx++;                        // they're ahead of me in line
+        }
+        return idx;
     }
 
     // Re-query so a recenter never leaves us chasing a stale world position. Keeps the nearest stop ahead.
@@ -110,23 +156,43 @@ public class RivalBrain : MonoBehaviour, TrafficVehicle.IVehicleBrain
     {
         if (SplineStopSpawner.Instance == null) return false;
         if (SplineStopSpawner.Instance.TryGetStopAhead(self.transform.position, self.transform.forward,
-                                                       stopSeekRange + 10f, out Vector3 p, out int waiting) && waiting > 0)
+                                                       stopSeekRange + 15f, out Vector3 p, out int waiting) && waiting > 0)
         { _stopPos = p; return true; }
-        // no waiting passengers left here (we or the player cleared it) → give up, go cruise
-        return _haveStop && Vector3.Distance(self.transform.position, _stopPos) < campDistance + 3f;
+        return _haveStop && Vector3.Distance(self.transform.position, _stopPos) < campDistance + 4f;
     }
 
-    // Outermost forward lane (toward the footpath where the stop is), via the vehicle's own band clamp later.
     float KerbLateral(TiledRoadStreamer road)
     {
         road.SampleBand(true, out float lo, out float hi);
         return hi;
     }
 
-    void MaybeBlockPlayer(TrafficVehicle self, TiledRoadStreamer road, ref float desiredLat)
+    // AGGRESSIVE blocking: when the player is just ahead or behind and close, slide into their lane and (if just
+    // ahead) ease off the throttle to sit in front of them — annoying, taking your line.
+    float _nextHornAt;
+
+    void MaybeBlockPlayer(TrafficVehicle self, TiledRoadStreamer road, ref float desiredSpeed, ref float desiredLat)
     {
-        // player sits at metresFromBus == 0; we block when we're just ahead of them and close
-        if (self.metresFromBus > 1f && self.metresFromBus < blockRange)
-            desiredLat = road.BusLateral;       // slide in front of the player's lane
+        float m = self.metresFromBus;                       // player sits at metresFromBus == 0
+        bool blocking = false;
+        if (m > 0.5f && m < blockRange)
+        {
+            desiredLat = road.BusLateral;                   // slide in front of the player's lane
+            if (m < blockRange * 0.5f) desiredSpeed = Mathf.Min(desiredSpeed, BusController.Instance != null
+                ? Mathf.Max(approachSpeed, BusController.Instance.SpeedMps * 0.92f) : desiredSpeed);  // sit just ahead
+            blocking = true;
+        }
+        else if (m < 0f && m > -blockRange * 0.6f)
+        {
+            desiredLat = road.BusLateral;                   // player overtaking → drift back across to re-block
+            blocking = true;
+        }
+
+        // annoying RIVAL HORN while it's bullying the player — honks OFTEN (this is the harassment).
+        if (blocking && Time.time >= _nextHornAt && Mathf.Abs(m) < blockRange)
+        {
+            _nextHornAt = Time.time + Random.Range(1.0f, 2.2f);
+            Sfx.PlayAt("horn_rival", self.transform.position, 0.6f, 0.02f);
+        }
     }
 }

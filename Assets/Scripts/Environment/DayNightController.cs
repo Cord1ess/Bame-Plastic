@@ -43,18 +43,24 @@ public class DayNightController : MonoBehaviour
     public Gradient ambientColor;    // Ambient environment color (essential for dark night shadow shading!)
     public Gradient fogColors;       // Color of the atmospheric fog
 
-    [Header("Smog (linear fog that hides distant objects)")]
+    [Header("Smog (exponential² depth haze that hides distant objects — cheap, WebGL-safe)")]
     public bool controlFog = true;
-    [Tooltip("Distance (m) where the smog STARTS — nearer than this is clear.")]
-    public float smogStart = 40f;
-    [Tooltip("Distance (m) where the smog FULLY hides objects — they smoothly fade out between start and end. " +
-             "Keep ≳ BuildingSpawner.spawnAhead so buildings fade in inside the smog (no pop-in).")]
-    public float smogEnd = 240f;
-    [Tooltip("Smog is a touch thicker at dawn/dusk/night: this scales how much START/END pull IN away from " +
-             "noon (0 = constant smog all day, 0.5 = noticeably hazier at the edges).")]
+    [Tooltip("The distance (m) at which the smog FULLY obscures (≈99% opaque). Set just past the building wall " +
+             "(BuildingSpawner.spawnAhead, ~200-250) so the wall's far edge + any gaps dissolve into haze while " +
+             "the near street stays crisp. Drives the exp² density: denser fog = shorter reach.")]
+    public float smogFullDistance = 220f;
+    [Tooltip("How much the fog colour matches the SKY (0 = pure smog tint, 1 = the time-of-day sky gradient). " +
+             "Higher = the horizon void dissolves into the sky (no seam). ~0.7 kills the 'nothingness' at the " +
+             "end of the street while keeping a warm haze.")]
+    [Range(0f, 1f)] public float fogSkyMatch = 0.7f;
+    [Tooltip("Smog is a touch thicker at dawn/dusk/night: how much the reach pulls IN away from noon " +
+             "(0 = constant all day, 0.35 = noticeably hazier at the edges).")]
     [Range(0f, 0.8f)] public float smogTimeVariation = 0.35f;
-    [Tooltip("Base smog tint (warm grey-brown haze). The time-of-day fogColors gradient tints on top of this.")]
+    [Tooltip("Base smog tint (warm grey-brown Dhaka haze). The time-of-day fogColors gradient tints on top.")]
     public Color smogTint = new Color(0.62f, 0.6f, 0.55f, 1f);
+    // legacy linear-fog fields kept for scene back-compat (no longer used directly; see smogFullDistance).
+    [HideInInspector] public float smogStart = 40f;
+    [HideInInspector] public float smogEnd = 240f;
 
     [Header("Skybox blending (optional)")]
     [Tooltip("Optional — auto-found. Crossfades cubemap skyboxes across the day in sync with this cycle.")]
@@ -65,12 +71,14 @@ public class DayNightController : MonoBehaviour
         // Flat ambient so our per-frame ambientLight tint actually applies (Skybox/Gradient modes ignore it).
         RenderSettings.ambientMode = UnityEngine.Rendering.AmbientMode.Flat;
 
-        // LINEAR fog = smog: objects fade smoothly to nothing between smogStart and smogEnd (distance-based,
-        // reads like polluted haze hiding the distance — not the old time-density exponential fog).
+        // EXPONENTIAL² fog = depth haze. Linear fog ramps uniformly → reads as a flat grey CURTAIN at the far
+        // plane. exp² thickens NON-linearly with depth: the near street stays crisp, the distance dissolves
+        // smoothly into haze (atmospheric, not a wall). Cheap (built-in per-vertex/fragment fog, no extra pass)
+        // and fully WebGL-safe — no raymarched volumetrics. Density is driven per-frame in Update().
         if (controlFog)
         {
             RenderSettings.fog = true;
-            RenderSettings.fogMode = FogMode.Linear;
+            RenderSettings.fogMode = FogMode.ExponentialSquared;
         }
     }
 
@@ -96,20 +104,23 @@ public class DayNightController : MonoBehaviour
             RenderSettings.ambientLight = ambientColor.Evaluate(currentTimeOfDay);
         }
 
-        // 1+3. SMOG: linear distance fog that smoothly hides the distance. Always present (polluted haze);
-        //       a bit thicker (start/end pulled IN) toward dawn/dusk/night. Colour = warm smog tint, tinted
-        //       by the time-of-day gradient so the haze warms at sunset / goes dim at night.
+        // 1+3. SMOG: exponential² depth haze. Density set so it's ~fully opaque at smogFullDistance — pulled IN a
+        //       bit toward dawn/dusk/night for a hazier edge. Colour = warm Dhaka tint, nudged toward the
+        //       time-of-day gradient (sunset warmth) and dimmed at night, so the distance MELTS into the sky
+        //       rather than ending at a hard fog wall.
         if (controlFog)
         {
             float fromNoon = Mathf.Clamp01(Mathf.Abs(currentTimeOfDay - 0.5f) / 0.5f);   // 0 noon .. 1 night
-            float thicken = 1f - smogTimeVariation * fromNoon;                            // 1 at noon, less at edges
-            RenderSettings.fogStartDistance = smogStart * thicken;
-            RenderSettings.fogEndDistance = Mathf.Max(smogStart * thicken + 5f, smogEnd * thicken);
+            float reach = Mathf.Max(20f, smogFullDistance * (1f - smogTimeVariation * fromNoon));
+            // exp² fog factor = exp(-(density·dist)²); ≈99% obscured when density·dist ≈ 2.146. So to be fully
+            // hazed at `reach`, density = 2.146 / reach.
+            RenderSettings.fogDensity = 2.146f / reach;
 
-            // smog colour: the warm haze tint, darkened toward night (so the smog dims, not stays bright at
-            // night) and nudged toward the time gradient for sunset warmth.
+            // Blend the warm smog tint TOWARD the time-of-day sky gradient. Higher fogSkyMatch = fog colour
+            // closer to the sky → the ground/road/horizon dissolve into the SAME tone as the skybox, so the
+            // 'nothingness' void at the end of the street disappears (no seam between fogged ground and sky).
             Color c = smogTint;
-            if (fogColors != null) c = Color.Lerp(c, fogColors.Evaluate(currentTimeOfDay), 0.45f);
+            if (fogColors != null) c = Color.Lerp(c, fogColors.Evaluate(currentTimeOfDay), fogSkyMatch);
             float nightDim = Mathf.Lerp(1f, 0.3f, fromNoon * fromNoon);   // bright by day, dim at night
             RenderSettings.fogColor = new Color(c.r * nightDim, c.g * nightDim, c.b * nightDim, 1f);
         }
@@ -123,6 +134,21 @@ public class DayNightController : MonoBehaviour
     public void SetTimeOfDay(float t)
     {
         currentTimeOfDay = Mathf.Clamp01(t);
+    }
+
+    /// True when it's dark enough for headlights: NIGHT and the EARLY MORNING before the sun rises (and dusk on).
+    /// Matches the sun-intensity ramp (lights on while the sun is at/near zero). Bus lights read this.
+    public bool LightsOn => currentTimeOfDay <= 0.26f || currentTimeOfDay >= 0.74f;
+
+    /// 0 (full daylight) .. 1 (full dark) — for fading light intensity smoothly at the edges.
+    public float Darkness
+    {
+        get
+        {
+            float dawn = Mathf.InverseLerp(0.30f, 0.20f, currentTimeOfDay);   // 1 before sunrise → 0 by full day
+            float dusk = Mathf.InverseLerp(0.70f, 0.84f, currentTimeOfDay);   // 0 at day → 1 into night
+            return Mathf.Clamp01(Mathf.Max(dawn, dusk));
+        }
     }
 
     /// Drive the cycle from SHIFT PROGRESS (0 = start .. 1 = end). Tuned so transitions are QUICK and NOON

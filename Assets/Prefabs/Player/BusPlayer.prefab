@@ -153,6 +153,8 @@ MonoBehaviour:
   drifting: 0
   maxSpeed: 35
   maxReverseSpeed: 6
+  boardingSpeedCapKmh: 10
+  conductor1Aboard: 1
   accelRate: 16
   brakeRate: 32
   coastRate: 6
@@ -199,14 +201,14 @@ MonoBehaviour:
   boardInterval: 0.35
   doorAnchor: {fileID: 2296072509997366910}
   doorLocalPos: {x: -1.3, y: 0, z: 3.5}
-  seatGrid: {x: 5, y: 15}
-  cabinLocalCenter: {x: 0, y: 1, z: -0.8}
-  cabinLocalSize: {x: 2, y: 0, z: 10}
+  seatGrid: {x: 5, y: 14}
+  cabinLocalCenter: {x: 0, y: 0.8, z: -0.45}
+  cabinLocalSize: {x: 2, y: 0, z: 9.6}
   seatStandThreshold: 0.7
   standCapacity: 12
-  walkAreaOffset: {x: 0, y: 0, z: 0}
-  walkHalfWidth: 0.3
-  walkHalfLength: 3
+  walkAreaOffset: {x: -0.03, y: 0, z: 0.33}
+  walkHalfWidth: 0.08
+  walkHalfLength: 4.8
   standJitter: 0.12
 --- !u!1 &4454863128399906905
 GameObject:

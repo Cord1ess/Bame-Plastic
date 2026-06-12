@@ -106,7 +106,8 @@ public class DriverGuide : MonoBehaviour
     {
         Resolve();
         EnsureRig();
-        if (bus == null) { _mr.enabled = false; return; }
+        // player setting can hide the guide line entirely (and skip its steer-assist) without removing the system
+        if (bus == null || !SettingsStore.GuideLine) { if (_mr != null) _mr.enabled = false; return; }
         _mr.enabled = true;
         EnsureBuffers();
         PlanPath();

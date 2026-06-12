@@ -10,6 +10,10 @@ public class Billboard : MonoBehaviour
     public enum Mode { UprightYAxis, FaceCamera }
     public Mode mode = Mode.UprightYAxis;
 
+    [Tooltip("When true, the sprite TILTS with its parent (pitch/roll) and only yaw-faces the camera — used for " +
+             "riders ABOARD the bus so they lean with it on turns/drifts instead of staying bolt-upright.")]
+    public bool tiltWithParent = false;
+
     Camera _cam;
 
     void LateUpdate()
@@ -24,12 +28,23 @@ public class Billboard : MonoBehaviour
         if (mode == Mode.FaceCamera)
         {
             transform.forward = _cam.transform.forward;
+            return;
+        }
+
+        Vector3 f = _cam.transform.forward;
+        f.y = 0f;                                      // yaw toward the camera (no camera pitch/roll)
+        if (f.sqrMagnitude <= 0.0001f) return;
+        Quaternion yaw = Quaternion.LookRotation(f.normalized, Vector3.up);
+
+        if (tiltWithParent && transform.parent != null)
+        {
+            // keep the camera-facing YAW but inherit the parent's TILT (pitch/roll) → leans with the bus.
+            Vector3 up = transform.parent.up;          // the tilted "up" of the cabin/bus model
+            transform.rotation = Quaternion.LookRotation(yaw * Vector3.forward, up);
         }
         else
         {
-            Vector3 f = _cam.transform.forward;
-            f.y = 0f;                                  // stay vertical (no pitch/roll)
-            if (f.sqrMagnitude > 0.0001f) transform.forward = f.normalized;
+            transform.rotation = yaw;                  // standing upright (footpath/world)
         }
     }
 }

@@ -10,7 +10,7 @@ public class LobbyScreen
 {
     readonly GameObject _root;
     readonly MenuController _menu;
-    readonly INetworkService _net;
+    INetworkService _net;            // not readonly: the server picker can swap it (before joining a room)
 
     // two sub-views: the browser (pick/create a room) and the in-room view (cards + start)
     GameObject _browserView, _roomView;
@@ -23,6 +23,11 @@ public class LobbyScreen
     InputField _codeInput;
     Transform _listContent;
     float _listInnerW;
+
+    // server picker
+    Text _serverLabel;
+    GameObject _serverPicker;
+    InputField _hostInput, _portInput;
 
     public LobbyScreen(Transform parent, MenuController menu, INetworkService net)
     {
@@ -38,13 +43,38 @@ public class LobbyScreen
         BuildRoom(_root.transform);
         ShowBrowser(true);              // start on the browser; never have both sub-views active at once
 
-        // events
+        Subscribe();
+    }
+
+    void Subscribe()
+    {
         _net.RoomJoined += OnRoomJoined;
         _net.RoomUpdated += Refresh;
         _net.RoomLeft += OnRoomLeft;
         _net.RoomListUpdated += OnRoomList;
         _net.JoinFailed += OnJoinFailed;
         _net.ShiftStarting += OnShiftStarting;
+    }
+    void Unsubscribe()
+    {
+        _net.RoomJoined -= OnRoomJoined;
+        _net.RoomUpdated -= Refresh;
+        _net.RoomLeft -= OnRoomLeft;
+        _net.RoomListUpdated -= OnRoomList;
+        _net.JoinFailed -= OnJoinFailed;
+        _net.ShiftStarting -= OnShiftStarting;
+    }
+
+    /// Switch to a different server: rebuild the network service from the current ServerConfig and re-bind the
+    /// lobby's events to it. Only safe before joining a room (the picker is only shown then).
+    void SwitchServer()
+    {
+        Unsubscribe();
+        SessionContext.Ensure().RebuildService();
+        _net = SessionContext.Instance.Net;
+        Subscribe();
+        if (_serverLabel != null) _serverLabel.text = ServerStatusText();
+        if (!ServerConfig.Offline) _net.RefreshRoomList();   // probe the new server
     }
 
     public void OnShown()
@@ -70,25 +100,33 @@ public class LobbyScreen
         var head = PixelUI.Label(b, "Heading", "PLAY ONLINE", 44, TextAnchor.UpperLeft, PixelUI.Ink);
         TL(head.rectTransform, pad, -26, innerW, 52);
 
+        // ── SERVER PICKER bar (choose WHICH running server to connect to) ──
+        _serverLabel = PixelUI.Label(b, "Server", ServerStatusText(), 18, TextAnchor.UpperLeft, PixelUI.Cyan);
+        TL(_serverLabel.rectTransform, pad, -84, innerW - 130f, 24);
+        PixelUIWidgets.Button(b, "ServerBtn", "SERVER", new Vector2(0, 1f), new Vector2(pad + innerW - 120f, -82), new Vector2(120, 36),
+                              () => ToggleServerPicker(true), PixelUI.InkDim);
+
         // ── HOST ──
-        PixelUIWidgets.Button(b, "Host", "HOST NEW ROOM", new Vector2(0, 1f), new Vector2(pad, -96), new Vector2(innerW, 70),
+        PixelUIWidgets.Button(b, "Host", "HOST NEW ROOM", new Vector2(0, 1f), new Vector2(pad, -128), new Vector2(innerW, 64),
                               () => _net.CreateRoom(), PixelUI.Green);
 
         // divider label
         var or = PixelUI.Label(b, "Or", "— OR JOIN BY CODE —", 20, TextAnchor.UpperLeft, PixelUI.InkDim);
-        TL(or.rectTransform, pad, -182, innerW, 26);
+        TL(or.rectTransform, pad, -204, innerW, 26);
 
         // code input + join (side by side, fits in innerW)
         float joinW = 150f, codeW = innerW - joinW - 12f;
-        _codeInput = PixelUIWidgets.Input(b, "Code", "", "BAME-XXXX", new Vector2(0, 1f), new Vector2(pad, -216), new Vector2(codeW, 60), null, 9);
-        PixelUIWidgets.Button(b, "Join", "JOIN", new Vector2(0, 1f), new Vector2(pad + codeW + 12f, -216), new Vector2(joinW, 60),
+        _codeInput = PixelUIWidgets.Input(b, "Code", "", "BAME-XXXX", new Vector2(0, 1f), new Vector2(pad, -236), new Vector2(codeW, 60), null, 9);
+        PixelUIWidgets.Button(b, "Join", "JOIN", new Vector2(0, 1f), new Vector2(pad + codeW + 12f, -236), new Vector2(joinW, 60),
                               () => _net.JoinRoom(_codeInput.text));
 
         // ── OPEN ROOMS list ──
         var roomsHead = PixelUI.Label(b, "RoomsHead", "OPEN ROOMS", 24, TextAnchor.UpperLeft, PixelUI.Gold);
-        TL(roomsHead.rectTransform, pad, -300, innerW - 150f, 30);
-        PixelUIWidgets.Button(b, "Refresh", "REFRESH", new Vector2(0, 1f), new Vector2(pad + innerW - 140f, -296), new Vector2(140, 40),
+        TL(roomsHead.rectTransform, pad, -320, innerW - 150f, 30);
+        PixelUIWidgets.Button(b, "Refresh", "REFRESH", new Vector2(0, 1f), new Vector2(pad + innerW - 140f, -316), new Vector2(140, 40),
                               () => _net.RefreshRoomList(), PixelUI.InkDim);
+
+        BuildServerPicker(b, innerW, pad);
 
         // list container (the rows fill downward)
         var listGo = new GameObject("List", typeof(RectTransform));
@@ -102,6 +140,70 @@ public class LobbyScreen
         // back (bottom of the panel)
         PixelUIWidgets.Button(b, "Back", "◀ BACK", new Vector2(0, 0f), new Vector2(pad, 24), new Vector2(220, 56),
                               () => _menu.BackToTitle(), PixelUI.InkDim);
+    }
+
+    string ServerStatusText()
+    {
+        if (ServerConfig.Offline) return "Server: OFFLINE (solo / practice — no server)";
+        return "Server: " + ServerConfig.Host + ":" + ServerConfig.Port;
+    }
+
+    // A small overlay panel: pick a preset, or type a custom host/port; Connect rebuilds the service.
+    void BuildServerPicker(Transform parent, float innerW, float pad)
+    {
+        _serverPicker = new GameObject("ServerPicker", typeof(RectTransform));
+        _serverPicker.transform.SetParent(parent, false);
+        var rt = (RectTransform)_serverPicker.transform;
+        rt.anchorMin = new Vector2(0, 1); rt.anchorMax = new Vector2(0, 1); rt.pivot = new Vector2(0, 1);
+        rt.anchoredPosition = new Vector2(pad, -120); rt.sizeDelta = new Vector2(innerW, 300);
+
+        var bg = PixelUI.Panel(_serverPicker.transform, "PickerBg", new Vector2(0, 1), new Vector2(0, 0), new Vector2(innerW, 300));
+        Transform pb = bg.transform; float ip = 20f, iw = innerW - ip * 2f;
+
+        var h = PixelUI.Label(pb, "H", "CHOOSE SERVER", 24, TextAnchor.UpperLeft, PixelUI.Gold);
+        TL(h.rectTransform, ip, -16, iw, 28);
+
+        // presets
+        float y = -56f;
+        foreach (var preset in ServerConfig.Presets)
+        {
+            var pcopy = preset;   // capture
+            PixelUIWidgets.Button(pb, "P_" + preset.label, preset.label, new Vector2(0, 1f), new Vector2(ip, y), new Vector2(iw, 40),
+                                  () => { ServerConfig.Apply(pcopy); SyncPickerFields(); }, PixelUI.InkDim);
+            y -= 48f;
+        }
+
+        // custom host + port
+        var lbl = PixelUI.Label(pb, "L", "Custom host / port", 16, TextAnchor.UpperLeft, PixelUI.InkDim);
+        TL(lbl.rectTransform, ip, y, iw, 22); y -= 28f;
+        float portW = 90f, hostW = iw - portW - 10f;
+        _hostInput = PixelUIWidgets.Input(pb, "Host", ServerConfig.Host, "host or ws://…", new Vector2(0, 1f), new Vector2(ip, y), new Vector2(hostW, 48), null, 64);
+        _portInput = PixelUIWidgets.Input(pb, "Port", ServerConfig.Port.ToString(), "port", new Vector2(0, 1f), new Vector2(ip + hostW + 10f, y), new Vector2(portW, 48), null, 6);
+        y -= 60f;
+
+        // connect + cancel
+        PixelUIWidgets.Button(pb, "Connect", "CONNECT", new Vector2(0, 1f), new Vector2(ip, y), new Vector2(iw * 0.6f - 6f, 48),
+                              () => { ApplyCustomFields(); SwitchServer(); ToggleServerPicker(false); }, PixelUI.Green);
+        PixelUIWidgets.Button(pb, "Cancel", "CANCEL", new Vector2(0, 1f), new Vector2(ip + iw * 0.6f + 6f, y), new Vector2(iw * 0.4f - 6f, 48),
+                              () => ToggleServerPicker(false), PixelUI.InkDim);
+
+        _serverPicker.SetActive(false);
+    }
+
+    void SyncPickerFields()
+    {
+        if (_hostInput != null) _hostInput.text = ServerConfig.Host;
+        if (_portInput != null) _portInput.text = ServerConfig.Port.ToString();
+    }
+    void ApplyCustomFields()
+    {
+        if (_hostInput != null && !string.IsNullOrWhiteSpace(_hostInput.text)) { ServerConfig.Host = _hostInput.text.Trim(); ServerConfig.Offline = false; }
+        if (_portInput != null && int.TryParse(_portInput.text, out int p) && p > 0) ServerConfig.Port = p;
+    }
+    void ToggleServerPicker(bool show)
+    {
+        if (_serverPicker != null) _serverPicker.SetActive(show);
+        if (show) SyncPickerFields();
     }
 
     // anchor a graphic to the TOP-LEFT of its parent at (x, y), left-pivoted

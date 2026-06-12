@@ -32,6 +32,7 @@ namespace BamePlastic.Net
         event Action<string> JoinFailed;           // reason
         event Action<RoomListing[]> RoomListUpdated;
         event Action<int> ShiftStarting;           // seed — load the game scene now
+        event Action<RoleReassign> RoleReassigned; // a player dropped mid-shift → the driver seat failed over
 
         // pumped each frame by the owner so the stub can simulate timers; real impl can no-op or poll socket
         void Tick(float dt);

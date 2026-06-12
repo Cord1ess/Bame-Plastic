@@ -9,7 +9,7 @@ using UnityEditor;
 /// Menu: Bame Plastic ▸ Create Tiled Road (Fast)
 public static class CreateTiledRoad
 {
-    [MenuItem("Bame Plastic/Create Tiled Road (Fast)")]
+    [MenuItem("Bame Plastic/Road/1. Create Tiled Road (Fast)")]
     static void Create()
     {
         GameObject go = new GameObject("TiledRoad");
@@ -22,7 +22,7 @@ public static class CreateTiledRoad
         go.AddComponent<TrafficSystem>();       // Phase C / L1: deterministic kinematic traffic both ways
         go.AddComponent<RivalManager>();        // L4: deploys rival buses (TrafficVehicle + RivalBrain) that camp stops
         var buildings = go.AddComponent<BuildingSpawner>();   // streets: streamed Akihabara block wall both sides
-        SeedBlocks(buildings);
+        SeedBlocks(buildings, freshlyAdded: true);
         go.AddComponent<RoadBarrier>();         // invisible wall past the footpath so the bus can't drive off
 
         // Driver guide line ("eagle-vision" optimal path through traffic). Auto-finds bus/road/traffic.
@@ -52,26 +52,30 @@ public static class CreateTiledRoad
 
     // Add (or refresh) the BuildingSpawner on the EXISTING road in the open scene — so you get the building
     // wall without recreating the road (keeps your tuning). Re-seeds the block prefab list too.
-    [MenuItem("Bame Plastic/Buildings/3. Add or Refresh Buildings On Road")]
+    [MenuItem("Bame Plastic/Road/2. Add or Refresh Buildings On Road")]
     static void AddBuildingsToExistingRoad()
     {
         var road = Object.FindAnyObjectByType<TiledRoadStreamer>();
         if (road == null) { Debug.LogWarning("[Buildings] No TiledRoad in the scene."); return; }
         var spawner = road.GetComponent<BuildingSpawner>();
-        if (spawner == null) spawner = Undo.AddComponent<BuildingSpawner>(road.gameObject);
-        SeedBlocks(spawner);
+        bool fresh = spawner == null;
+        if (fresh) spawner = Undo.AddComponent<BuildingSpawner>(road.gameObject);
+        SeedBlocks(spawner, fresh);
         if (road.GetComponent<RoadBarrier>() == null) Undo.AddComponent<RoadBarrier>(road.gameObject);
         Selection.activeGameObject = road.gameObject;
     }
 
     // Fill the spawner's building list from the extracted Akihabara building prefabs (Assets/Prefabs/City/Bld_*).
-    static void SeedBlocks(BuildingSpawner spawner)
+    static void SeedBlocks(BuildingSpawner spawner, bool freshlyAdded)
     {
+        // When the spawner is FIRST added, set a sane real height — the extracted prefabs are tiny at native
+        // scale, so leaving targetHeight at 0 makes them specks. On a refresh we DON'T touch it (keep user tuning).
+        if (freshlyAdded && spawner.targetHeight < 0.01f) spawner.targetHeight = 28f;
+
         const string dir = "Assets/Prefabs/City";
         if (!System.IO.Directory.Exists(dir))
         {
-            Debug.LogWarning("[Buildings] No extracted buildings at " + dir +
-                             " — run 'Bame Plastic ▸ Buildings ▸ 1. Extract Akihabara Buildings' first.");
+            Debug.LogWarning("[Buildings] No building prefabs at " + dir + " — expected the Bld_* prefabs there.");
             return;
         }
         var list = new System.Collections.Generic.List<GameObject>();
