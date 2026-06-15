@@ -34,6 +34,14 @@ public class FootpathPedestrians : MonoBehaviour
     public int baseFare = 20;
     public int fareVariance = 15;
 
+    [Header("Conversion to fares")]
+    [Tooltip("Base chance a footpath walker is even WILLING to become a passenger (decided once at spawn). Most " +
+             "people on the street aren't waiting for YOUR bus — ~0.2 means roughly 2 in 10 will ever board/join.")]
+    [Range(0f, 1f)] public float convertChance = 0.2f;
+    [Tooltip("Extra conversion chance added at FULL mic shout (Conductor 1 calling out). At 0.2 base + 0.3 this " +
+             "tops out ~0.5 (≈5 in 10) when shouting hard.")]
+    [Range(0f, 1f)] public float convertChanceShoutBonus = 0.3f;
+
     [Header("Board off the street")]
     [Tooltip("When the bus is stopped/slow, a player-side walker within this distance (m) of the door boards " +
              "directly — pick people up anywhere, not just at stops.")]
@@ -51,6 +59,7 @@ public class FootpathPedestrians : MonoBehaviour
         public bool crossing;      // mid road-crossing to the other footpath
         public float crossTargetLat;   // the far footpath lateral we're crossing toward
         public float crossCooldown;    // seconds until this walker may consider crossing again
+        public bool willConvert;   // decided at spawn: does THIS walker ever become a fare? (most don't)
     }
 
     [Header("Avoidance + crossing")]
@@ -62,18 +71,30 @@ public class FootpathPedestrians : MonoBehaviour
     public float dodgeLerp = 0.2f;
     [Tooltip("How fast a walker drifts back toward their footpath once nothing is near (gentle return, no snap).")]
     public float returnSpeed = 0.5f;
-    [Tooltip("Chance per second a footpath walker decides to cross the road to the other side.")]
-    [Range(0f, 0.2f)] public float crossChancePerSec = 0.004f;   // far fewer road crossings
     [Tooltip("Crossing speed (m/s laterally) — a brisk walk across the road.")]
     public float crossSpeed = 2.4f;
     [Tooltip("Min seconds between a walker's crossings.")]
     public float crossCooldownSec = 20f;
+
+    [Header("Designated crossing points")]
+    [Tooltip("People only cross at SPECIFIC points (like a zebra crossing), not anywhere. Metres of road between " +
+             "consecutive crossing points — bigger = rarer crossings. ~220 ≈ one every couple of stops.")]
+    public float crossingPointSpacing = 220f;
+    [Tooltip("How close (m along the road) a walker must be to a crossing point to start crossing there.")]
+    public float crossingPointRadius = 9f;
+    [Tooltip("Per-second chance a walker AT a crossing point decides to cross (so 3–4 gather + cross, not all).")]
+    [Range(0f, 1f)] public float crossAtPointChance = 0.5f;
+    [Tooltip("Max walkers that may be mid-cross at one crossing point at once (keeps it to a small group).")]
+    public int maxCrossersPerPoint = 4;
 
     TiledRoadStreamer _road;
     RoadZone _zone;
     Transform _parent;
     readonly List<Walker> _live = new List<Walker>();
     readonly Stack<Walker> _free = new Stack<Walker>();
+    // designated crossing points, tracked road-relative (metres ahead of bus). Streamed like everything else.
+    readonly List<float> _crossPoints = new List<float>();
+    float _nextCrossPointAt;     // the road-distance cursor for placing the next crossing point
     bool _ready;
     bool _seeded;   // did the one-time full-span initial fill (incl. beside the bus)
 
@@ -110,6 +131,7 @@ public class FootpathPedestrians : MonoBehaviour
     {
         if (!Application.isPlaying) return;
         var go = new GameObject("Pedestrians"); go.transform.SetParent(transform, false); _parent = go.transform;
+        _nextCrossPointAt = crossingPointSpacing * 0.5f;   // first crossing point a little ahead, not at the bus
         _ready = true;
     }
 
@@ -130,6 +152,8 @@ public class FootpathPedestrians : MonoBehaviour
         float busSpeed = bus != null ? bus.SpeedMps : 0f;
         float dt = Time.deltaTime;
         float ahead = _road.MetresAhead - 5f;
+
+        UpdateCrossingPoints(busSpeed, dt, ahead);
 
         for (int i = _live.Count - 1; i >= 0; i--)
         {
@@ -157,9 +181,10 @@ public class FootpathPedestrians : MonoBehaviour
                 }
                 // else: blocked — hold position this frame (wait for the gap)
             }
-            else if (w.crossCooldown <= 0f && Random.value < crossChancePerSec * dt)
+            else if (w.crossCooldown <= 0f && NearCrossingPoint(w.metres) && Random.value < crossAtPointChance * dt
+                     && CrossersAt(w.metres) < maxCrossersPerPoint)
             {
-                // decide to cross: target the opposite footpath's lateral
+                // at a DESIGNATED crossing point → cross to the opposite footpath (a small group, not everyone)
                 w.crossTargetLat = FootpathLateral(-w.side);
                 w.crossing = true;
             }
@@ -190,9 +215,9 @@ public class FootpathPedestrians : MonoBehaviour
                 if (face.sqrMagnitude > 1e-5f) w.p.transform.rotation = Quaternion.LookRotation(face, Vector3.up);
 
                 // BOARD WHEN STOPPED ANYWHERE: if the bus is pulled up (slow) and this player-side walker is near
-                // the door, they hop on directly — you can pick people up off the street, not only at stops.
+                // the door, they hop on directly — but ONLY if they're a willing fare (most aren't; shouting helps).
                 BusPassengers bp = BusPassengers.Instance;
-                if (w.side > 0 && bp != null && bp.CanBoard &&
+                if (w.side > 0 && bp != null && bp.CanBoard && WantsToConvert(w) &&
                     (pos - bp.DoorPosition).sqrMagnitude < boardWhenStoppedRange * boardWhenStoppedRange)
                 {
                     w.p.ResetWaiting(baseFare, Color.grey);   // becomes a fare
@@ -200,8 +225,8 @@ public class FootpathPedestrians : MonoBehaviour
                     Recycle(i, false); continue;               // the bus owns it now
                 }
 
-                // Only PLAYER-SIDE walkers (side +1) join stops as fares — the far footpath is ambience.
-                if (w.side > 0 && SplineStopSpawner.Instance != null &&
+                // Only PLAYER-SIDE, WILLING walkers join stops as fares — the rest just stroll past (ambience).
+                if (w.side > 0 && WantsToConvert(w) && SplineStopSpawner.Instance != null &&
                     SplineStopSpawner.Instance.TryJoinNearestStop(w.p, pos))
                 { Recycle(i, false); continue; }   // ownership passed to the stop; don't pool it
             }
@@ -238,6 +263,55 @@ public class FootpathPedestrians : MonoBehaviour
         int n = 0;
         for (int i = 0; i < _live.Count; i++) if (_live[i].side == side) n++;
         return n;
+    }
+
+    // ---- designated crossing points (zebra-style): people only cross the road AT these, not anywhere ----
+    void UpdateCrossingPoints(float busSpeed, float dt, float ahead)
+    {
+        // points are static in the world → recede relative to the moving bus; cull ones well behind.
+        for (int i = _crossPoints.Count - 1; i >= 0; i--)
+        {
+            _crossPoints[i] -= busSpeed * dt;
+            if (_crossPoints[i] < -cullBehind - 10f) _crossPoints.RemoveAt(i);
+        }
+        _nextCrossPointAt -= busSpeed * dt;
+        // place the next crossing point once its cursor falls within the built-ahead road (spaced out → rare).
+        while (_nextCrossPointAt < ahead)
+        {
+            if (_nextCrossPointAt > -cullBehind) _crossPoints.Add(_nextCrossPointAt);
+            _nextCrossPointAt += crossingPointSpacing;
+        }
+    }
+
+    bool NearCrossingPoint(float metres)
+    {
+        for (int i = 0; i < _crossPoints.Count; i++)
+            if (Mathf.Abs(_crossPoints[i] - metres) <= crossingPointRadius) return true;
+        return false;
+    }
+
+    // how many walkers are currently crossing near the same point as `metres` (cap the group size).
+    int CrossersAt(float metres)
+    {
+        int n = 0;
+        for (int i = 0; i < _live.Count; i++)
+            if (_live[i].crossing && Mathf.Abs(_live[i].metres - metres) <= crossingPointRadius * 2f) n++;
+        return n;
+    }
+
+    // Is this walker willing to become a fare right now? Base willingness is rolled once at spawn (most aren't).
+    // Conductor 1 SHOUTING (mic) can upgrade an unwilling walker — a one-time chance scaled by loudness, applied
+    // permanently so the conversion doesn't re-roll every frame (which would eventually convert everyone).
+    bool WantsToConvert(Walker w)
+    {
+        if (w.willConvert) return true;
+        var mic = MicInput.Instance;
+        float loud = mic != null ? mic.Loudness : 0f;
+        if (loud < 0.35f) return false;                                  // not shouting → unwilling stays unwilling
+        // louder shout → better odds, capped by convertChanceShoutBonus, rolled per-frame-but-rare via dt scaling
+        float perSec = convertChanceShoutBonus * Mathf.InverseLerp(0.35f, 1f, loud);
+        if (Random.value < perSec * Time.deltaTime * 3f) { w.willConvert = true; return true; }
+        return false;
     }
 
     // ---- AVOIDANCE: peds steer away from the bus + cars; a hard push-out guarantees no overlap ----
@@ -355,6 +429,7 @@ public class FootpathPedestrians : MonoBehaviour
         w.homeLateral = w.lateral;
         w.dir = Random.value < sameWayChance ? +1 : -1;
         w.speed = Random.Range(walkSpeed.x, walkSpeed.y);
+        w.willConvert = side > 0 && Random.value < convertChance;   // most walkers never become fares (decided once)
 
         p.transform.SetParent(_parent, true);
         p.BeginWalking(baseFare + Random.Range(0, fareVariance + 1), Color.grey);

@@ -168,11 +168,17 @@ public class BusPassengers : MonoBehaviour
         if (!authoritative) { PruneDoorQueue(); return; }
 
         // STOPPED ANYWHERE: riders who rang the bell get off here (not only at official stops) — pull over for the
-        // roof indicator and they alight onto the footpath. Driver-authoritative (this whole Update is gated).
-        if (Speed <= boardSpeedThreshold) ReleaseAlightersAtStop();
+        // roof indicator and they alight onto the footpath. ALIGHTING GOES FIRST and ONE-AT-A-TIME: release one
+        // bell-ringer per boardInterval, and don't let ANY boarder in until every alighter has cleared the door.
+        // (Real Dhaka bus etiquette — people get off before anyone climbs on.) Driver-authoritative (Update gated).
+        if (Speed <= boardSpeedThreshold && Time.time >= _doorCooldownUntil)
+        {
+            if (ReleaseOneAlighter()) _doorCooldownUntil = Time.time + boardInterval;
+        }
 
         PruneDoorQueue();
         if (_doorQueue.Count == 0) return;
+        if (AnyAlighting()) return;                  // OFF BEFORE ON — boarders wait until the aisle/door is clear
         if (Time.time < _doorCooldownUntil) return;
         if (Speed > boardSpeedThreshold) return;     // only board while stopped/slow
 
@@ -265,9 +271,35 @@ public class BusPassengers : MonoBehaviour
     }
 
     /// Called when the bus is stopped at a stop: any aboard rider who rang the bell starts to alight + walk off.
+    /// (Legacy all-at-once; the queued one-at-a-time path is ReleaseOneAlighter, used by Update.)
     public void ReleaseAlightersAtStop()
     {
         for (int i = 0; i < _aboard.Count; i++) if (_aboard[i] != null) _aboard[i].TryAlightAtStop();
+    }
+
+    /// Start ONE waiting bell-ringer alighting (the first aboard rider that wants off and is still settled).
+    /// Returns true if one was started — Update spaces these by boardInterval so they file out the door in turn.
+    bool ReleaseOneAlighter()
+    {
+        for (int i = 0; i < _aboard.Count; i++)
+        {
+            var p = _aboard[i];
+            if (p != null && p.WantsOff && p.CurrentState == Passenger.State.Aboard)
+            {
+                p.TryAlightAtStop();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// True while any rider is mid-alight (threading the aisle out / stepping off). Boarders wait on this so
+    /// people get OFF before anyone gets ON, and the single door isn't used both ways at once.
+    public bool AnyAlighting()
+    {
+        for (int i = 0; i < _aboard.Count; i++)
+            if (_aboard[i] != null && _aboard[i].CurrentState == Passenger.State.Alighting) return true;
+        return false;
     }
 
     /// The inside conductor's reachable riders (aboard) — used for nearest-unpaid selection.

@@ -99,7 +99,11 @@ public class RoleController : MonoBehaviour
             _role = (Role)(((int)_role + 1) % 3);
             Apply(_role);
         }
+        // the Auto-Conductors setting can be toggled mid-shift (pause menu) — re-apply when it changes so the
+        // unmanned crew start/stop their AI immediately without needing a role switch.
+        if (SettingsStore.AutoConductors != _autoCondApplied) Apply(_role);
     }
+    bool _autoCondApplied;
 
     // The clip plane has to track the (moving) bus every frame, so it lives in LateUpdate.
     void LateUpdate()
@@ -169,7 +173,19 @@ public class RoleController : MonoBehaviour
     void SetCutaway(bool on)
     {
         _cutawayActive = on;
-        if (_busRenderers == null || _busClipMats == null) return;
+        if (_busRenderers == null) return;
+
+        // FALLBACK: if the roof-clip shader wasn't available (e.g. stripped from a build), we have no clip
+        // materials — rather than leave the roof solid (you can't see inside, the inside-conductor view "breaks"),
+        // just HIDE the bus body renderers while in the C2 view. Less pretty than the slice, but the cabin is
+        // always visible. (The shader is force-included via Always Included Shaders, so this rarely triggers.)
+        if (_busClipMats == null)
+        {
+            for (int i = 0; i < _busRenderers.Length; i++)
+                if (_busRenderers[i] != null) _busRenderers[i].enabled = !on;
+            return;
+        }
+
         for (int i = 0; i < _busRenderers.Length; i++)
         {
             if (_busRenderers[i] == null) continue;
@@ -191,12 +207,15 @@ public class RoleController : MonoBehaviour
         if (conductor1 != null) conductor1.SetControlled(c1);
         if (conductor2 != null) conductor2.SetControlled(c2);
 
-        // SOLO: the two crew the human ISN'T controlling run automatically (and can be switched into any time).
+        // SOLO: the two crew the human ISN'T controlling run automatically — IF the "Auto Conductors" setting is
+        // on. When OFF, the player controls ALL THREE (no AI); switch between them with C, the unmanned ones idle.
         // MULTIPLAYER: other roles are remote avatars / driven by their own clients — never local AI.
         if (!_multiplayer)
         {
-            if (conductor1 != null) conductor1.SetAI(!c1);
-            if (conductor2 != null) conductor2.SetAI(!c2);
+            bool auto = SettingsStore.AutoConductors;
+            _autoCondApplied = auto;
+            if (conductor1 != null) conductor1.SetAI(auto && !c1);
+            if (conductor2 != null) conductor2.SetAI(auto && !c2);
         }
 
         if (cam == null || bus == null) return;
@@ -239,6 +258,9 @@ public class RoleController : MonoBehaviour
         if (BusPassengers.Instance != null && BusPassengers.Instance.doorAnchor != null)
             home = BusPassengers.Instance.doorAnchor;
         BillboardCharacter v = BillboardCharacter.Create("Conductor1", new Color(0.12f, 0.12f, 0.16f), 1.9f, home.position);
+        // real art: C1 walk cycle (auto-plays while running around, idles at the door); flips by direction.
+        if (CharacterSprites.C1Walk != null) v.SetWalk(CharacterSprites.C1Walk, 0.08f);
+        else if (CharacterSprites.C1OnDoor != null) v.SetSprite(CharacterSprites.C1OnDoor);
         Conductor c = v.gameObject.AddComponent<Conductor>();
         c.Setup(v, home);
         return c;
@@ -256,6 +278,9 @@ public class RoleController : MonoBehaviour
             size = BusPassengers.Instance.cabinLocalSize;
         }
         BillboardCharacter v = BillboardCharacter.Create("Conductor2", new Color(0.18f, 0.1f, 0.1f), 1.9f, cabin.position);
+        // real art: C2 front-view walk cycle (walks the aisle); idles on frame 0 when collecting.
+        if (CharacterSprites.C2WalkFront != null) v.SetWalk(CharacterSprites.C2WalkFront, 0.1f);
+        else if (CharacterSprites.C2Collect != null) v.SetSprite(CharacterSprites.C2Collect);
         InsideConductor c = v.gameObject.AddComponent<InsideConductor>();
         c.Setup(v, cabin, center, size);
         return c;

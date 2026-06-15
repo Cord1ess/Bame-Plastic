@@ -17,7 +17,7 @@ public static class TransientUICleaner
         "MenuCanvas", "MenuUI", "SpeedoCanvas", "HUDCanvas", "GuideStrip", "FogRing (runtime)",
         // these are runtime-spawned under the road/managers; if SERIALIZED (no DontSave) they're baked junk.
         // The DontSave-skip above protects the LIVE edit-preview copies, so only baked ones are stripped.
-        "Tiles", "Traffic", "Rivals", "Pedestrians", "CityBlocks", "RoadBarrier",
+        "Tiles", "Traffic", "Rivals", "Pedestrians", "CityBlocks", "RoadBarrier", "PoliceHazards",
     };
     static readonly string[] OrphanPrefixes = { "MenuCrew_" };
 

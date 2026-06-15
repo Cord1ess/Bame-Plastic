@@ -6,9 +6,11 @@ using UnityEngine.EventSystems;
 // Runtime behaviours backing the PixelUIWidgets builders. Hard colour-swap states only (no gradients/tweens)
 // to keep the crisp retro feel. Each is added by the matching PixelUIWidgets.* factory.
 
-/// Cut-corner button: idle/hover/press fills + an accent underline shown on hover.
+/// Cut-corner button: idle/hover/press fills + an accent underline shown on hover. Also implements the
+/// EventSystem SELECT/SUBMIT handlers so a GAMEPAD or KEYBOARD can navigate + activate it (the same visuals as
+/// pointer hover/click), not just the mouse. A sibling Selectable (added by the factory) makes it focusable.
 public class PixelButton : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler, IPointerDownHandler,
-                           IPointerUpHandler, IPointerClickHandler
+                           IPointerUpHandler, IPointerClickHandler, ISelectHandler, IDeselectHandler, ISubmitHandler
 {
     Image _bg;
     Text _label;
@@ -78,6 +80,23 @@ public class PixelButton : MonoBehaviour, IPointerEnterHandler, IPointerExitHand
     public void OnPointerDown(PointerEventData e) { if (_interactable) { _bg.color = _press; Sink(true); } }
     public void OnPointerUp(PointerEventData e)   { if (_interactable) { _bg.color = _hover; Sink(false); } }
     public void OnPointerClick(PointerEventData e) { if (_interactable) _onClick?.Invoke(); }
+
+    // ---- gamepad / keyboard navigation: mirror the hover/click visuals on EventSystem focus ----
+    public void OnSelect(BaseEventData e)
+    {
+        if (!_interactable) return;
+        _bg.color = _hover;
+        if (_underline) _underline.gameObject.SetActive(true);
+        if (_label) _label.color = _accent;
+    }
+    public void OnDeselect(BaseEventData e)
+    {
+        if (!_interactable) return;
+        _bg.color = _activeTab ? _hover : _idle;
+        if (_underline) _underline.gameObject.SetActive(_activeTab);
+        if (_label) _label.color = _activeTab ? _accent : PixelUI.Ink;
+    }
+    public void OnSubmit(BaseEventData e) { if (_interactable) _onClick?.Invoke(); }
 }
 
 /// Checkbox: shows/hides the check block; flat colour states.

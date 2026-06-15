@@ -53,14 +53,26 @@ public class MenuMode : MonoBehaviour
 
     public IReadOnlyList<MenuCrewMember> Crew => _crew;
 
+    bool _built;
+
     // ---------- lifecycle (PLAY ONLY — nothing runs/creates in edit mode) ----------
     IEnumerator Start()
     {
         // wait for the bus + camera (the road generator seats the bus on load)
         float t = 0f;
         while ((_bus == null || _cam == null) && t < 5f) { Resolve(); t += Time.deltaTime; yield return null; }
+        EnterMenu();
+    }
+
+    /// Park the bus, frame the camera, and build the crew + menu UI. Safe to call once the bus/camera exist
+    /// (idempotent via _built). Start() calls it after the load wait; ReturnToMenu calls it directly mid-game.
+    public void EnterMenu()
+    {
+        if (_built) return;
+        Resolve();
+        _built = true;
         if (GameManager.Instance != null) GameManager.Instance.SetState(GameManager.GameState.Menu);
-        if (_bus != null) _bus.controlEnabled = false;   // parked
+        if (_bus != null) { _bus.controlEnabled = false; _bus.HardStop(); }   // parked + momentum killed
         BuildWorld();
     }
 
@@ -112,9 +124,13 @@ public class MenuMode : MonoBehaviour
     {
         ClearCrew();
         Color[] cols = { PixelUI.Gold, PixelUI.Cyan, PixelUI.Green };
+        // the menu/lobby lineup uses the real POSE sprites (arms-crossed) per role: Driver, Conductor 1, Conductor 2.
+        CharacterSprites.Build();
+        Sprite[] poses = { CharacterSprites.DriverPose, CharacterSprites.C1Pose, CharacterSprites.C2Pose };
         for (int i = 0; i < 3; i++)
         {
             var bc = BillboardCharacter.Create("MenuCrew_" + (Role)i, cols[i], crewHeight, CrewPos(i), null);
+            if (poses[i] != null) bc.SetSprite(poses[i]);     // real art (else keep the tinted placeholder)
             var go = bc.gameObject;
             go.hideFlags = HideFlags.DontSave;           // preview objects aren't serialized into the scene
             var member = go.AddComponent<MenuCrewMember>();
@@ -187,6 +203,32 @@ public class MenuMode : MonoBehaviour
             _cam.fieldOfView = Mathf.Lerp(f0, endFov, u);
             yield return null;
         }
+    }
+
+    /// Return to the MENU IN PLACE (no scene reload) — used by "Leave Shift". The bus parks WHERE IT IS and the
+    /// menu rebuilds around it, so the streamed road/buildings/world stay exactly as they are (a scene reload was
+    /// what dropped them + made the bus fall). Resets the shift to idle, then re-creates a MenuMode whose Start
+    /// re-frames the camera, parks the bus, and rebuilds the crew + menu UI at the current spot.
+    public static void ReturnToMenu()
+    {
+        if (UnityEngine.SceneManagement.SceneManager.GetActiveScene().name != SceneFlow.Game) return;
+        Debug.Log("[MenuMode] ReturnToMenu — rebuilding the living menu in place.");
+        Time.timeScale = 1f;
+        BusController.GamePaused = false;
+
+        // tear down any existing MenuMode (shouldn't be one mid-shift, but be safe) so we don't stack menus
+        foreach (var existing in FindObjectsByType<MenuMode>(FindObjectsSortMode.None)) Destroy(existing.gameObject);
+
+        // stop the shift + hide its gameplay HUD; back to the Boot/Menu game state
+        var shift = ShiftManager.Instance != null ? ShiftManager.Instance : FindAnyObjectByType<ShiftManager>();
+        if (shift != null) shift.EndToMenu();
+        if (GameManager.Instance != null) GameManager.Instance.SetState(GameManager.GameState.Menu);
+
+        // re-create the living menu + build it IMMEDIATELY (the bus/camera already exist mid-game, so no need to
+        // wait for load like the first-boot path). EnterMenu re-parks the bus, frames the camera, and shows the UI.
+        var go = new GameObject("MenuMode");
+        var mm = go.AddComponent<MenuMode>();
+        mm.EnterMenu();
     }
 
     // ---------- start → gameplay ----------

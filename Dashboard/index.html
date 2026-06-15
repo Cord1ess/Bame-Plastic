@@ -60,7 +60,8 @@
 
         <div class="grid two">
           <div class="panel">
-            <h3 class="panel-title">REALTIME TRAFFIC</h3>
+            <h3 class="panel-title">REALTIME TRAFFIC <span class="live-dot" id="ws-live" title="live WebSocket push">●</span></h3>
+            <div class="kv"><span>Messages / sec (live)</span><b id="tr-rate">0</b></div>
             <div class="kv"><span>Lobby messages (text)</span><b id="tr-text">0</b></div>
             <div class="kv"><span>Game frames (binary)</span><b id="tr-bin">0</b></div>
             <div class="kv"><span>Bytes relayed</span><b id="tr-bytes">0 B</b></div>
@@ -70,6 +71,11 @@
             <h3 class="panel-title">DATABASE TABLES</h3>
             <div id="db-counts" class="db-counts"><div class="muted">—</div></div>
           </div>
+        </div>
+
+        <div class="panel">
+          <h3 class="panel-title">GAME ANALYTICS</h3>
+          <div id="analytics" class="analytics"><div class="muted">—</div></div>
         </div>
 
         <div class="panel">

@@ -40,9 +40,10 @@ public class MainMenuScreen
         AddButton(c, "Solo", "PLAY SOLO",   by0 - gap,      bw, bh, menu.PlaySolo,        PixelUI.Cyan);
         AddButton(c, "Shop", "SHOP & CUSTOMIZE", by0 - gap * 2, bw, bh, menu.OpenStore,   PixelUI.Green);
         AddButton(c, "Leaderboard", "LEADERBOARD", by0 - gap * 3, bw, bh, menu.OpenLeaderboard, PixelUI.Gold);
-        AddButton(c, "Settings", "SETTINGS", by0 - gap * 4, bw, bh, menu.OpenSettings,    PixelUI.InkDim);
+        AddButton(c, "Achievements", "ACHIEVEMENTS", by0 - gap * 4, bw, bh, menu.OpenAchievements, PixelUI.Cyan);
+        AddButton(c, "Settings", "SETTINGS", by0 - gap * 5, bw, bh, menu.OpenSettings,    PixelUI.InkDim);
 #if !UNITY_WEBGL
-        AddButton(c, "Quit", "QUIT",         by0 - gap * 5, bw, bh, menu.Quit,            PixelUI.Red);
+        AddButton(c, "Quit", "QUIT",         by0 - gap * 6, bw, bh, menu.Quit,            PixelUI.Red);
 #endif
 
         // springs in visual order: title, rule, then the buttons (already appended)

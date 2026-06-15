@@ -12,6 +12,7 @@ public static class SettingsStore
     const string K_VSync = "gfx_vsync", K_RenderScale = "gfx_renderscale";
     const string K_Name = "player_name";
     const string K_Shake = "gp_shake", K_GuideLine = "gp_guideline", K_InvertCam = "gp_invertcam", K_Mic = "gp_mic";
+    const string K_AutoCond = "gp_autoconductors";
 
     /// Frame-rate cap options (index → value). -1 = uncapped (VSync off, target -1).
     public static readonly int[] FpsOptions = { 30, 60, 120, 144, -1 };
@@ -33,6 +34,8 @@ public static class SettingsStore
     public static bool GuideLine   { get => PlayerPrefs.GetInt(K_GuideLine, 1) == 1; set => PlayerPrefs.SetInt(K_GuideLine, value ? 1 : 0); }
     /// Conductor microphone (shout-to-call / fare-bonus). Default ON.
     public static bool MicEnabled  { get => PlayerPrefs.GetInt(K_Mic, 1) == 1; set => PlayerPrefs.SetInt(K_Mic, value ? 1 : 0); }
+    /// SOLO: the two crew you aren't controlling work AUTOMATICALLY. Off = you control all 3 (switch with C).
+    public static bool AutoConductors { get => PlayerPrefs.GetInt(K_AutoCond, 1) == 1; set => PlayerPrefs.SetInt(K_AutoCond, value ? 1 : 0); }
     public static bool InvertCam   { get => PlayerPrefs.GetInt(K_InvertCam, 0) == 1; set => PlayerPrefs.SetInt(K_InvertCam, value ? 1 : 0); }
 
     public static string PlayerName
@@ -40,6 +43,12 @@ public static class SettingsStore
         get { string n = PlayerPrefs.GetString(K_Name, ""); return string.IsNullOrWhiteSpace(n) ? "Player" : n; }
         set => PlayerPrefs.SetString(K_Name, value);
     }
+
+    // ---- control rebinding (one PlayerPrefs key per persisted action; see GameInput.PersistOrder) ----
+    const string K_BindPrefix = "bind_override_";
+    public static string GetBindingOverride(int slot) => PlayerPrefs.GetString(K_BindPrefix + slot, "");
+    public static void SetBindingOverride(int slot, string json) { PlayerPrefs.SetString(K_BindPrefix + slot, json ?? ""); PlayerPrefs.Save(); }
+    public static void ClearBindingOverrides() { for (int i = 0; i < 16; i++) PlayerPrefs.DeleteKey(K_BindPrefix + i); PlayerPrefs.Save(); }
 
     static AudioMixer _mixer;
 

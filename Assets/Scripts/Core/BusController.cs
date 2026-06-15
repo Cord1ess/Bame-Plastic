@@ -419,6 +419,16 @@ public class BusController : MonoBehaviour
         Impacted?.Invoke(severity);
     }
 
+    /// INSTANT full stop in place — kills both the drive speed AND the physics sphere's momentum (ApplyImpact(0)
+    /// alone leaves the sphere coasting on). Used by the police checkpoint when the bus blows through too fast.
+    public void HardStop()
+    {
+        currentSpeed = 0f;
+        drifting = false;
+        if (sphere != null) { sphere.linearVelocity = Vector3.zero; sphere.angularVelocity = Vector3.zero; }
+        Impacted?.Invoke(1f);
+    }
+
     /// Physically KNOCK the bus back — used when it rams a SOLID obstacle (a rival bus) so it bounces off
     /// instead of passing through. Pushes the physics sphere in `worldDir` (away from the obstacle). `force` is
     /// the bounce-back speed (m/s). `hard` = a real impact (kills drive speed + fires the camera shake once);

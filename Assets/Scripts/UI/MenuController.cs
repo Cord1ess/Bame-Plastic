@@ -8,7 +8,7 @@ using BamePlastic.Net;
 /// PLAY-ONLY (created by MenuMode only in play) — no [ExecuteAlways], so no edit-mode duplicate canvases.
 public class MenuController : MonoBehaviour
 {
-    public enum Screen { Auth, Title, Lobby, Settings, Store, Leaderboard }
+    public enum Screen { Auth, Title, Lobby, Settings, Store, Leaderboard, Achievements }
 
     [Tooltip("The screen shown first.")]
     public Screen startScreen = Screen.Title;
@@ -20,6 +20,7 @@ public class MenuController : MonoBehaviour
     SettingsScreen _settings;
     StoreScreen _store;
     LeaderboardScreen _leaderboard;
+    AchievementsScreen _achievements;
     WalletBar _wallet;
     Screen _current = Screen.Title;
 
@@ -58,6 +59,7 @@ public class MenuController : MonoBehaviour
         _settings = new SettingsScreen(_canvas.transform, this);
         _store = new StoreScreen(_canvas.transform, this);
         _leaderboard = new LeaderboardScreen(_canvas.transform, this);
+        _achievements = new AchievementsScreen(_canvas.transform, this);
         // top-right wallet (Bhara + "+") — visible on the Title screen; "+" opens the store on the GET BHARA tab
         _wallet = new WalletBar(_canvas.transform, OpenStore);
     }
@@ -71,6 +73,7 @@ public class MenuController : MonoBehaviour
         _settings?.SetVisible(s == Screen.Settings);
         _store?.SetVisible(s == Screen.Store);
         _leaderboard?.SetVisible(s == Screen.Leaderboard);
+        _achievements?.SetVisible(s == Screen.Achievements);
         // wallet rides along the Title + Store screens only
         _wallet?.SetVisible(s == Screen.Title || s == Screen.Store);
         if (s == Screen.Lobby) _lobby?.OnShown();
@@ -78,6 +81,28 @@ public class MenuController : MonoBehaviour
         // crew are only clickable role-pickers while IN the lobby; elsewhere they're just scenery
         var mm = _menuMode;
         if (mm != null) foreach (var c in mm.Crew) if (c != null) c.SetInteractable(s == Screen.Lobby);
+
+        // GAMEPAD/KEYBOARD: give the EventSystem a starting focus on the newly-shown screen, so a controller can
+        // navigate without first clicking. Deferred a frame so SetVisible has activated the screen's widgets.
+        if (Application.isPlaying && isActiveAndEnabled) StartCoroutine(FocusFirstSelectableNextFrame());
+    }
+
+    System.Collections.IEnumerator FocusFirstSelectableNextFrame()
+    {
+        yield return null;
+        var es = UnityEngine.EventSystems.EventSystem.current;
+        if (es == null) yield break;
+        // pick the first ACTIVE, interactable Selectable under this menu canvas (screens hide via SetActive(false)).
+        var all = GetComponentsInChildren<UnityEngine.UI.Selectable>(false);
+        foreach (var sel in all)
+        {
+            if (sel != null && sel.isActiveAndEnabled && sel.interactable)
+            {
+                es.SetSelectedGameObject(sel.gameObject);
+                yield break;
+            }
+        }
+        es.SetSelectedGameObject(null);
     }
 
     /// Called by AuthScreen on a successful login/signup (or guest) — sync the player name and enter the title.
@@ -94,6 +119,7 @@ public class MenuController : MonoBehaviour
 
     public void OpenStore() => Show(Screen.Store);
     public void OpenLeaderboard() => Show(Screen.Leaderboard);
+    public void OpenAchievements() => Show(Screen.Achievements);
 
     public void Logout() { PlayerAccount.Logout(); Show(Screen.Auth); }
 

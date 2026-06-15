@@ -20,7 +20,7 @@ public static class RigWheels
 
     static void Assign(bool front)
     {
-        BusController bus = Object.FindFirstObjectByType<BusController>();
+        BusController bus = Object.FindAnyObjectByType<BusController>();
         if (bus == null) { Warn("No BusController in the scene."); return; }
 
         Transform pivot = front ? bus.frontWheels : bus.backWheels;

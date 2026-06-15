@@ -26,7 +26,7 @@ RenderSettings:
   m_AmbientIntensity: 1
   m_AmbientMode: 3
   m_SubtractiveShadowColor: {r: 0.42, g: 0.478, b: 0.627, a: 1}
-  m_SkyboxMaterial: {fileID: 2097325736}
+  m_SkyboxMaterial: {fileID: 1930679552}
   m_HaloStrength: 0.368
   m_FlareStrength: 1
   m_FlareFadeSpeed: 3
@@ -1010,9 +1010,9 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::RivalManager
   rivals:
-  - name: Sonar Bangla
+  - name: Balaka
     color: {r: 0.85, g: 0.2, b: 0.25, a: 1}
-  - name: Dhaka Express
+  - name: Victor Classic
     color: {r: 0.2, g: 0.45, b: 0.9, a: 1}
 --- !u!114 &1226895166
 MonoBehaviour:
@@ -1029,6 +1029,7 @@ MonoBehaviour:
   maxVehicles: 8
   maxSameDir: 5
   maxOncoming: 7
+  maxSpawnPerFrame: 8
   edgeMargin: 20
   minGap: 20
   sameLaneWidth: 2.5
@@ -1038,6 +1039,7 @@ MonoBehaviour:
   rickshawWeight: 0.65
   carWeight: 0.25
   busWeight: 0.15
+  truckWeight: 0.05
   maxBuses: 4
   crossChancePerSec: 0.03
   rickshawSpeed: {x: 5, y: 8}
@@ -1065,13 +1067,18 @@ MonoBehaviour:
   lateralWander: 0.8
   baseFare: 20
   fareVariance: 15
+  convertChance: 0.2
+  convertChanceShoutBonus: 0.3
   boardWhenStoppedRange: 6
   avoidRadius: 1.5
   dodgeLerp: 0.2
   returnSpeed: 0.5
-  crossChancePerSec: 0.015
   crossSpeed: 2.2
   crossCooldownSec: 8
+  crossingPointSpacing: 220
+  crossingPointRadius: 9
+  crossAtPointChance: 0.5
+  maxCrossersPerPoint: 4
 --- !u!114 &1226895168
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -1087,6 +1094,8 @@ MonoBehaviour:
   sectionsPerStop: 2
   maxLiveStops: 6
   recycleDistance: 70
+  busStopYawOffset: 180
+  busStopScale: 1.8
   crowdMin: 5
   crowdMax: 14
   crowdSpread: 6
@@ -1095,7 +1104,7 @@ MonoBehaviour:
   fareVariance: 15
   gatherRange: 45
   boardRange: 22
-  boardFraction: 0.5
+  autoBoardCount: 10
   ensurePoolSize: 250
   joinRange: 7
   crowdCap: 28
@@ -1450,6 +1459,46 @@ MonoBehaviour:
   debugDamageKey: 104
   debugDamageAmount: 10
   restartKey: 114
+--- !u!21 &1930679552
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: SkyboxBlend (runtime)
+  m_Shader: {fileID: 4800000, guid: 24834f8424c78714fb79b60b8ae5ab46, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords: []
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _Tex:
+        m_Texture: {fileID: 8900000, guid: ee1ef284a95b0e24582670375fbb1d35, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _Tex2:
+        m_Texture: {fileID: 8900000, guid: d0d59302157ea1244817b96cdbb7f53b, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _Blend: 0.9
+    - _Exposure: 1.25
+    - _Rotation: 188
+    m_Colors:
+    - _Tint: {r: 0.5, g: 0.5, b: 0.5, a: 0.5}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1
 --- !u!21 &1933111695
 Material:
   serializedVersion: 8
@@ -1767,46 +1816,6 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
---- !u!21 &2097325736
-Material:
-  serializedVersion: 8
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_Name: SkyboxBlend (runtime)
-  m_Shader: {fileID: 4800000, guid: 24834f8424c78714fb79b60b8ae5ab46, type: 3}
-  m_Parent: {fileID: 0}
-  m_ModifiedSerializedProperties: 0
-  m_ValidKeywords: []
-  m_InvalidKeywords: []
-  m_LightmapFlags: 4
-  m_EnableInstancingVariants: 0
-  m_DoubleSidedGI: 0
-  m_CustomRenderQueue: -1
-  stringTagMap: {}
-  disabledShaderPasses: []
-  m_LockedProperties: 
-  m_SavedProperties:
-    serializedVersion: 3
-    m_TexEnvs:
-    - _Tex:
-        m_Texture: {fileID: 8900000, guid: ee1ef284a95b0e24582670375fbb1d35, type: 3}
-        m_Scale: {x: 1, y: 1}
-        m_Offset: {x: 0, y: 0}
-    - _Tex2:
-        m_Texture: {fileID: 8900000, guid: d0d59302157ea1244817b96cdbb7f53b, type: 3}
-        m_Scale: {x: 1, y: 1}
-        m_Offset: {x: 0, y: 0}
-    m_Ints: []
-    m_Floats:
-    - _Blend: 0.9
-    - _Exposure: 1.25
-    - _Rotation: 188
-    m_Colors:
-    - _Tint: {r: 0.5, g: 0.5, b: 0.5, a: 0.5}
-  m_BuildTextureStacks: []
-  m_AllowLocking: 1
 --- !u!1001 &2594454392769682319
 PrefabInstance:
   m_ObjectHideFlags: 0

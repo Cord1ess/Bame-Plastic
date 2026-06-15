@@ -248,3 +248,15 @@ table.data tr:hover td { background: #ffffff08; }
   .nav-item { font-size: 0; padding: 14px 0; text-align: center; }
   .nav-count { float: none; font-size: 11px; }
 }
+
+/* ---- Game Analytics panel (grid of small stat cards) ---- */
+.analytics { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.an-card { background: var(--panel); border: 1px solid var(--frame-soft); border-radius: 6px; padding: 12px 14px; }
+.an-title { color: var(--gold); font-size: 11px; letter-spacing: 2px; margin-bottom: 8px; }
+.an-row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 13px; color: var(--ink-dim); }
+.an-row b { color: var(--ink); text-align: right; }
+
+/* ---- live WebSocket indicator dot in the Realtime Traffic title ---- */
+.live-dot { color: var(--ink-dim); font-size: 10px; margin-left: 6px; transition: color .2s; }
+.live-dot.on { color: var(--green); text-shadow: 0 0 8px var(--green); animation: livepulse 1.4s ease-in-out infinite; }
+@keyframes livepulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }

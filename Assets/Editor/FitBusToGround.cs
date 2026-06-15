@@ -23,7 +23,7 @@ public static class FitBusToGround
     [MenuItem("Bame Plastic/Bus/Fit Bus To Ground")]
     public static void Fit()
     {
-        BusController bus = Object.FindFirstObjectByType<BusController>();
+        BusController bus = Object.FindAnyObjectByType<BusController>();
         if (bus == null) { EditorUtility.DisplayDialog("Fit Bus", "No BusController found in the scene.", "OK"); return; }
         if (bus.busModel == null) { EditorUtility.DisplayDialog("Fit Bus", "BusController.busModel isn't assigned.", "OK"); return; }
 

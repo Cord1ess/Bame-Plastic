@@ -85,18 +85,95 @@
       renderHealth(health);
       renderRooms(rooms);
       renderFeed(feed);
-      // DB + leaderboard a touch less critical but cheap enough each tick
-      const [db, lb] = await Promise.all([api("/api/admin/db"), api("/api/leaderboard").catch(() => [])]);
+      // DB + leaderboard + analytics — cheap enough each tick
+      const [db, lb, stats] = await Promise.all([
+        api("/api/admin/db"),
+        api("/api/leaderboard").catch(() => []),
+        api("/api/admin/stats").catch(() => null),
+      ]);
       lastDb = db;
       renderDbCounts(db);
       renderTableTabs(db);
       renderTableView();
       renderLeaderboard(lb);
+      renderAnalytics(stats);
       stamp();
+      ensureMonitorSocket();   // open the live push socket (once)
     } catch (e) {
       backendUp = false;
       setOffline(true);
     }
+  }
+
+  // ---------- live WebSocket push (instant updates between polls) ----------
+  let monitorWs = null;
+  function ensureMonitorSocket() {
+    if (monitorWs && (monitorWs.readyState === 0 || monitorWs.readyState === 1)) return;
+    try {
+      monitorWs = new WebSocket(CFG.BACKEND_WS.replace(/\/ws\/session.*$/, "/ws/monitor"));
+      monitorWs.onopen = () => setLive(true);
+      monitorWs.onclose = () => { setLive(false); monitorWs = null; };
+      monitorWs.onerror = () => setLive(false);
+      monitorWs.onmessage = (ev) => {
+        let snap; try { snap = JSON.parse(ev.data); } catch { return; }
+        renderLiveSnapshot(snap);
+      };
+    } catch (e) { setLive(false); }
+  }
+  function setLive(on) {
+    const d = $("#ws-live"); if (d) d.classList.toggle("on", !!on);
+  }
+  // apply a pushed snapshot (realtime totals + msg rate + feed + room counts) without waiting for the next poll
+  function renderLiveSnapshot(s) {
+    const rt = s.realtime || {};
+    $("#tr-rate").textContent = (rt.msgRate ?? 0);
+    $("#tr-text").textContent = rt.textMessages ?? 0;
+    $("#tr-bin").textContent = rt.binaryMessages ?? 0;
+    $("#tr-bytes").textContent = fmtBytes(rt.bytesRelayed);
+    $("#tr-clock").textContent = clockOf(s.t);
+    $("#st-conn").textContent = rt.activeConnections ?? 0;
+    $("#st-conn-sub").textContent = (rt.totalConnections ?? 0) + " total";
+    $("#st-rooms").textContent = rt.rooms ?? 0;
+    $("#st-rooms-sub").textContent = (rt.activeGames ?? 0) + " in-game";
+    $("#st-uptime").textContent = "uptime " + fmtDur(s.uptimeSeconds);
+    $("#pill-conn-n").textContent = rt.activeConnections ?? 0;
+    $("#pill-games-n").textContent = rt.activeGames ?? 0;
+    if (s.feed) renderFeed(s.feed);
+  }
+
+  function renderAnalytics(s) {
+    const host = $("#analytics");
+    if (!host) return;
+    if (!s) { host.innerHTML = `<div class="muted">—</div>`; return; }
+    const p = s.players || {}, sh = s.shifts || {}, ac = s.achievements || {}, pay = s.payments || {};
+    const card = (title, rows) =>
+      `<div class="an-card"><div class="an-title">${esc(title)}</div>${rows.map(([k, v]) => `<div class="an-row"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join("")}</div>`;
+    host.innerHTML =
+      card("PLAYERS", [
+        ["Accounts", p.count ?? 0],
+        ["Bhara in circulation", p.totalBhara ?? 0],
+        ["Career earnings", p.careerEarnings ?? 0],
+        ["Fares collected", p.totalFaresCollected ?? 0],
+        ["Shifts played", p.totalShiftsPlayed ?? 0],
+        ["Richest", p.richest ?? "—"],
+        ["Top earner", p.topEarner ?? "—"],
+      ]) +
+      card("SHIFTS", [
+        ["Results saved", sh.count ?? 0],
+        ["Total earnings", sh.totalEarnings ?? 0],
+        ["Average / shift", sh.avgEarnings ?? 0],
+        ["Best shift", sh.bestEarnings ?? 0],
+      ]) +
+      card("ACHIEVEMENTS", [
+        ["Unlocked (total)", ac.unlockedTotal ?? 0],
+        ["Players with any", ac.uniquePlayers ?? 0],
+      ]) +
+      card("PAYMENTS", [
+        ["Transactions", pay.count ?? 0],
+        ["Completed", pay.completed ?? 0],
+        ["Taka revenue", pay.takaRevenue ?? 0],
+        ["Bhara sold", pay.bharaSold ?? 0],
+      ]);
   }
 
   function stamp() { $("#last-update").textContent = "updated " + new Date().toLocaleTimeString(); }
@@ -136,6 +213,7 @@
     $("#st-conn").textContent = rt.activeConnections ?? 0;
     $("#st-conn-sub").textContent = (rt.totalConnections ?? 0) + " total";
 
+    if (rt.msgRate != null) $("#tr-rate").textContent = rt.msgRate;
     $("#tr-text").textContent = rt.textMessages ?? 0;
     $("#tr-bin").textContent = rt.binaryMessages ?? 0;
     $("#tr-bytes").textContent = fmtBytes(rt.bytesRelayed);
@@ -280,10 +358,10 @@ CREATE DATABASE bame_plastic_db;</div>
         <p>It serves on <code>${esc(HTTP)}</code>. Tables auto-create on first run. This dashboard turns
         <b class="gold">green</b> at the top once it's up.</p>
 
-        <h4>3 · The game (Unity)</h4>
-        <p>Open the Unity project, press Play, and go <b>Play Online ▸ Host</b> or <b>Join</b>. The bus's
-        <code>SessionContext.USE_BACKEND</code> must be <code>true</code> and <code>BACKEND_URL</code> point at
-        <code>${esc(CFG.BACKEND_WS)}</code>. (Set <code>USE_BACKEND=false</code> to play against the offline stub.)</p>
+        <h4>3 · The game</h4>
+        <p>Launch the game (WebGL build served by the backend at <code>${esc(HTTP)}/</code>, or the Unity editor).
+        At the <b>LOG IN</b> screen set the <b>SERVER</b> field to this backend's host, then go
+        <b>Play Online ▸ Host</b> or <b>Join</b>. (Pick <b>Offline</b> to play against the in-game stub — no server.)</p>
 
         <h4>4 · This dashboard</h4>
         <p>Just open <code>Dashboard/index.html</code> in a browser. It reads <code>${esc(HTTP)}/api/admin/*</code>.
@@ -331,10 +409,12 @@ CREATE DATABASE bame_plastic_db;</div>
         <h3>▸ ENDPOINTS THIS HUB READS (all read-only)</h3>
         <ul>
           <li><code>GET /api/admin/health</code> — server + DB health, uptime, realtime totals</li>
+          <li><code>GET /api/admin/stats</code> — game analytics (players, shifts, achievements, payments)</li>
           <li><code>GET /api/admin/rooms</code> — every live room with slot detail</li>
           <li><code>GET /api/admin/feed</code> — recent realtime events</li>
           <li><code>GET /api/admin/db</code> — every table's count + latest rows</li>
           <li><code>GET /api/leaderboard</code> — top shift results</li>
+          <li><code>WS /ws/monitor</code> — live push of stats + feed (the green ● dot = connected)</li>
         </ul>
       </div>`;
   }

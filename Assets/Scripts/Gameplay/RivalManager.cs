@@ -13,11 +13,14 @@ public class RivalManager : MonoBehaviour
     public struct RivalDef { public string name; public Color color; }
 
     [Header("Rivals")]
+    // Names MUST match entries in ShiftManager.GenerateDefaultRivals so a physical rival bus LINKS to an existing
+    // standings entry (and earns a real-fare bonus on top of its adaptive sim) instead of creating a 6th board row.
+    // We put physical buses on the strongest leaders so the bus you SEE on the road is one you're actually racing.
     public List<RivalDef> rivals = new List<RivalDef>
     {
-        new RivalDef { name = "Sonar Bangla",  color = new Color(0.85f, 0.2f, 0.25f) },
-        new RivalDef { name = "Dhaka Express",  color = new Color(0.2f, 0.45f, 0.9f) },
-        new RivalDef { name = "Bismillah",      color = new Color(0.95f, 0.7f, 0.15f) },
+        new RivalDef { name = "Balaka",         color = new Color(0.85f, 0.2f, 0.25f) },
+        new RivalDef { name = "Victor Classic", color = new Color(0.2f, 0.45f, 0.9f) },
+        new RivalDef { name = "Raida",          color = new Color(0.95f, 0.7f, 0.15f) },
     };
 
     TrafficSystem _traffic;

@@ -369,11 +369,12 @@ public class TiledRoadStreamer : MonoBehaviour
         // snaps). So we SMOOTH it: compute the raw projection, then ease _busTileF toward it. The bus's true
         // road progress is continuous (physics-driven), so the filter tracks it tightly with no lag while
         // rejecting the per-frame measurement jitter.
-        TileSpan s = _live[_busTileIndex];
-        Vector3 a = s.endPt, c = s.startPt;           // a=front edge (t=0), c=rear edge (t=1)
-        Vector3 seg = c - a;
-        float segLen2 = seg.sqrMagnitude;
-        float t = segLen2 > 1e-6f ? Mathf.Clamp01(Vector3.Dot(b - a, seg) / segLen2) : 0f;
+        //
+        // ⚠️ CURVE FIX: project onto the span's CURVED polyline (pts[]), NOT the straight chord endPt→startPt.
+        // On a corner the chord cuts across the arc, so the chord-`t` diverges from the arc-`t` that CenterlineAt
+        // uses — _busTileF then drifts ahead/behind the bus through the curve and snaps back, dragging every
+        // road-relative agent (cars/peds) with it (the "rubber-band slide" bug). Matching the arc param kills it.
+        float t = ProjectOntoSpan(_live[_busTileIndex], b);
         float raw = _busTileIndex + t;
 
         float prevTileF = _busTileF;
@@ -421,6 +422,33 @@ public class TiledRoadStreamer : MonoBehaviour
         float sideSign = (forward == lht) ? -1f : 1f;     // forward+LHT → -X side
         float a = sideSign * mh, b = sideSign * dh;
         min = Mathf.Min(a, b); max = Mathf.Max(a, b);
+    }
+
+    // Project point b onto a span's CURVED centreline polyline and return the fractional tile param t in
+    // CenterlineAt's convention: t=0 = front edge (pts[R-1]), t=1 = rear edge (pts[0]). Walks each polyline
+    // segment, finds the nearest, and converts the nearest ring-index to t. This is what makes the bus's tracked
+    // position follow the ARC on curves (the chord projection cut corners → the rubber-band slide).
+    float ProjectOntoSpan(TileSpan s, Vector3 b)
+    {
+        if (s.pts == null || s.pts.Length < 2)
+        {
+            // fallback: straight chord (front=endPt at t=0 → rear=startPt at t=1)
+            Vector3 a0 = s.endPt, c0 = s.startPt; Vector3 seg0 = c0 - a0; float l2 = seg0.sqrMagnitude;
+            return l2 > 1e-6f ? Mathf.Clamp01(Vector3.Dot(b - a0, seg0) / l2) : 0f;
+        }
+        int R = s.pts.Length;
+        float bestD = float.MaxValue; float bestRing = 0f;     // ring index along pts[] (0=rear … R-1=front)
+        for (int i = 0; i < R - 1; i++)
+        {
+            Vector3 p = s.pts[i], q = s.pts[i + 1];
+            Vector3 seg = q - p; float l2 = seg.sqrMagnitude;
+            float u = l2 > 1e-6f ? Mathf.Clamp01(Vector3.Dot(b - p, seg) / l2) : 0f;
+            Vector3 proj = p + seg * u;
+            float d = (proj - b).sqrMagnitude;
+            if (d < bestD) { bestD = d; bestRing = i + u; }
+        }
+        // ring → t: front (pts[R-1]) is t=0, rear (pts[0]) is t=1, matching CenterlineAt's `ring = (1-t)*(R-1)`.
+        return Mathf.Clamp01(1f - bestRing / (R - 1));
     }
 
     float SqrToTile(int i, Vector3 b)

@@ -46,7 +46,7 @@ public static class AddBusCollisionBox
             if (b != null) return b;
         }
 #if UNITY_2022_2_OR_NEWER
-        return Object.FindFirstObjectByType<BusController>();
+        return Object.FindAnyObjectByType<BusController>();
 #else
         return Object.FindObjectOfType<BusController>();
 #endif

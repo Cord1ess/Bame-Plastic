@@ -139,7 +139,7 @@ public class GUIController : MonoBehaviour {
 		
 		if (GUI.Button (new Rect (Screen.width -100,700,100,100), "to Fly Mode"))
 		{
-			Application.LoadLevel("02_OperateQuery_Flying");
+			UnityEngine.SceneManagement.SceneManager.LoadScene("02_OperateQuery_Flying");
 		}
 
 	}

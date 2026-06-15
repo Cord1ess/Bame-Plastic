@@ -255,30 +255,35 @@ public class LobbyScreen
         hrt.anchorMin = hrt.anchorMax = new Vector2(0, 1f); hrt.pivot = new Vector2(0, 1f);
         hrt.anchoredPosition = new Vector2(90, -160); hrt.sizeDelta = new Vector2(700, 28);
 
-        // ---- minimal bottom overlay strip (the 3D crew lineup IS the picker) ----
-        var bar = PixelUI.Panel(p, "Bar", new Vector2(0.5f, 0f), new Vector2(0, 40), new Vector2(980, 120));
+        // ---- bottom overlay strip (the 3D crew lineup IS the picker) ----
+        var bar = PixelUI.Panel(p, "Bar", new Vector2(0.5f, 0f), new Vector2(0, 40), new Vector2(1040, 130));
 
-        // your current role (left)
+        // your current role + crew occupancy (LEFT half of the bar — kept clear of the buttons)
         _roleLabel = PixelUI.Label(bar.transform, "YourRole", "PICK A ROLE", 30, TextAnchor.MiddleLeft, PixelUI.Gold);
         var yr = _roleLabel.rectTransform;
         yr.anchorMin = new Vector2(0, 0.5f); yr.anchorMax = new Vector2(0, 0.5f); yr.pivot = new Vector2(0, 0.5f);
-        yr.anchoredPosition = new Vector2(28, 18); yr.sizeDelta = new Vector2(420, 44);
-        _crewStatus = PixelUI.Label(bar.transform, "CrewStatus", "", 20, TextAnchor.MiddleLeft, PixelUI.InkDim);
+        yr.anchoredPosition = new Vector2(30, 24); yr.sizeDelta = new Vector2(520, 44);
+        _crewStatus = PixelUI.Label(bar.transform, "CrewStatus", "", 19, TextAnchor.MiddleLeft, PixelUI.InkDim);
         var cs = _crewStatus.rectTransform;
         cs.anchorMin = new Vector2(0, 0.5f); cs.anchorMax = new Vector2(0, 0.5f); cs.pivot = new Vector2(0, 0.5f);
-        cs.anchoredPosition = new Vector2(28, -22); cs.sizeDelta = new Vector2(500, 26);
+        cs.anchoredPosition = new Vector2(30, -26); cs.sizeDelta = new Vector2(560, 26);
 
-        // ready + start (right)
-        _readyBtn = PixelUIWidgets.Button(bar.transform, "Ready", "READY", new Vector2(1, 0.5f), new Vector2(-360, 0), new Vector2(200, 76),
+        // READY + START side-by-side at the RIGHT, with a clear gap (no overlap). The Button factory anchors AND
+        // pivots at (1,0.5), so the X position is the button's RIGHT-edge offset from the bar's right edge. START
+        // is the rightmost; READY sits a full button-width + gap to its LEFT. START hides for non-drivers (Refresh).
+        const float btnW = 200f, btnH = 80f, gap = 24f, edge = 30f;
+        float startX = -edge;
+        float readyX = -(edge + btnW + gap);
+        _readyBtn = PixelUIWidgets.Button(bar.transform, "Ready", "READY", new Vector2(1, 0.5f), new Vector2(readyX, 0), new Vector2(btnW, btnH),
                                           ToggleReady, PixelUI.Green);
-        _startBtn = PixelUIWidgets.Button(bar.transform, "Start", "START", new Vector2(1, 0.5f), new Vector2(-150, 0), new Vector2(280, 76),
+        _startBtn = PixelUIWidgets.Button(bar.transform, "Start", "START", new Vector2(1, 0.5f), new Vector2(startX, 0), new Vector2(btnW, btnH),
                                           () => _net.StartShift(), PixelUI.Gold);
 
         // status line just above the bar (errors / "waiting for the driver…")
         _statusLabel = PixelUI.Label(p, "Status", "", 24, TextAnchor.MiddleCenter, PixelUI.InkDim, outline: true);
         var slt = _statusLabel.rectTransform;
         slt.anchorMin = slt.anchorMax = new Vector2(0.5f, 0f); slt.pivot = new Vector2(0.5f, 0f);
-        slt.anchoredPosition = new Vector2(0, 172); slt.sizeDelta = new Vector2(900, 30);
+        slt.anchoredPosition = new Vector2(0, 182); slt.sizeDelta = new Vector2(900, 30);
 
         // leave (top-left, above the room code)
         PixelUIWidgets.Button(p, "Leave", "◀ LEAVE", new Vector2(0, 1f), new Vector2(90, -40), new Vector2(180, 50),

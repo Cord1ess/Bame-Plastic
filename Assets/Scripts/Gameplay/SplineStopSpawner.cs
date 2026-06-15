@@ -21,13 +21,18 @@ public class SplineStopSpawner : MonoBehaviour
     public int maxLiveStops = 6;
     [Tooltip("Recycle a stop once the bus is this far PAST it (metres behind).")]
     public float recycleDistance = 70f;
+    [Header("Shelter model")]
+    [Tooltip("Extra Y rotation (deg) for the shelter — 180 flips it to face the road the right way.")]
+    public float busStopYawOffset = 180f;
+    [Tooltip("Uniform scale for the shelter model (bigger = a more prominent stop).")]
+    public float busStopScale = 1.8f;
 
     [Header("Waiting crowd")]
     [Tooltip("Initial crowd seeded when a stop appears. Keep LOW if FootpathPedestrians (L5) is feeding it — " +
              "the crowd then visibly grows as walkers arrive. Raise toward crowdMax if you want full stops " +
              "without walkers.")]
-    public int crowdMin = 5;
-    public int crowdMax = 14;
+    public int crowdMin = 14;
+    public int crowdMax = 26;
     public float crowdSpread = 6f;
     public float curbDepth = 1.2f;
 
@@ -38,7 +43,10 @@ public class SplineStopSpawner : MonoBehaviour
     [Header("Crowd-up & boarding")]
     public float gatherRange = 45f;
     public float boardRange = 22f;
-    [Range(0f, 1f)] public float boardFraction = 0.5f;
+    [Tooltip("How many of the waiting crowd board AUTOMATICALLY when the bus pulls up. The REST stay waiting — " +
+             "Conductor 1 must shout (mic) or manually grab them to get more on. ~10 keeps the bus from filling " +
+             "itself for free.")]
+    public int autoBoardCount = 10;
 
     [Header("Pool (auto-created if missing)")]
     public int ensurePoolSize = 250;
@@ -109,18 +117,36 @@ public class SplineStopSpawner : MonoBehaviour
         if (_live.Count >= maxLiveStops) return;
 
         if (++_sectionsSinceStop < Random.Range(sectionsPerStop, sectionsPerStop + 2)) return;
-        _sectionsSinceStop = 0;
 
         if (!LeadFrame(out Vector3 pos, out Vector3 fwd, out Vector3 right)) return;
+        // DON'T place a stop on a curve (the shelter ends up skewed / over the road, and gathering looks wrong).
+        // Only commit on a roughly-straight stretch; otherwise wait for the next section (keeps the counter so we
+        // don't pile up — it resets only on a successful placement).
+        if (!IsStraightHere()) return;
+        _sectionsSinceStop = 0;
         PlaceStop(pos, fwd, right);
+    }
+
+    // Is the road roughly straight at the lead frame? Compares the forward direction a little ahead vs behind the
+    // lead; a big heading change = a curve, so we skip placing a stop there.
+    bool IsStraightHere()
+    {
+        if (_tiled == null) return true;
+        float m = _tiled.MetresAhead;
+        if (!_tiled.SampleRoad(m - 12f, 0f, out _, out Vector3 f0, out _)) return true;
+        if (!_tiled.SampleRoad(m - 28f, 0f, out _, out Vector3 f1, out _)) return true;
+        return Vector3.Angle(f0, f1) < 7f;   // < ~7° over ~16 m = straight enough
     }
 
     void PlaceStop(Vector3 framePos, Vector3 fwd, Vector3 right)
     {
         // LEFT footpath under LHT is on -X (right points +X), between the lane edge and the kerb.
-        float footCenter = (_zone.DriveHalf + _zone.RoadHalf) * 0.5f;
         Vector3 left = -right;
-        Vector3 stopPos = framePos + left * footCenter;
+        // SHELTER sits HALF ON THE FOOTPATH, HALF ON THE GROUND — pushed out to the footpath/ground boundary
+        // (RoadHalf is the footpath outer edge) so it's off the walking path, not planted in the middle of it.
+        float shelterLateral = _zone.RoadHalf;                       // the kerb/ground seam
+        Vector3 stopPos = framePos + left * shelterLateral;
+        // PASSENGERS gather on the FOOTPATH (between the lane edge and the kerb), nearer the road than the shelter.
         Vector3 curbBase = framePos + left * (_zone.DriveHalf + curbDepth);
         float groundY = framePos.y;
         stopPos.y = groundY; curbBase.y = groundY;
@@ -134,16 +160,26 @@ public class SplineStopSpawner : MonoBehaviour
         st.box.SetActive(true);
         // a real shelter model is base-pivoted → sit on the ground; the cube fallback is centre-pivoted → lift it.
         float lift = _stopIsCube ? 0.75f : 0f;
-        st.box.transform.SetPositionAndRotation(stopPos + Vector3.up * lift, Quaternion.LookRotation(fwd, Vector3.up));
+        // the shelter faces +Z; the model was authored facing the WRONG way down the road, so rotate it 180°
+        // (cube fallback keeps the plain facing). Real shelter is also scaled UP to read as a proper stop.
+        Quaternion yaw = Quaternion.LookRotation(fwd, Vector3.up);
+        if (!_stopIsCube)
+        {
+            yaw *= Quaternion.Euler(0f, busStopYawOffset, 0f);
+            st.box.transform.localScale = Vector3.one * busStopScale;
+        }
+        st.box.transform.SetPositionAndRotation(stopPos + Vector3.up * lift, yaw);
 
-        // borrow a crowd scattered on the footpath behind the kerb
+        // crowd waits ON THE FOOTPATH (between the kerb and the shelter), NOT out on the ground where the shelter is.
+        Vector3 footCenter = framePos + (-right) * ((_zone.DriveHalf + _zone.RoadHalf) * 0.5f);
+        footCenter.y = groundY;
         int want = Random.Range(crowdMin, crowdMax + 1);
         for (int i = 0; i < want; i++)
         {
             Passenger p = PassengerPool.Instance.Take();
             if (p == null) break;                       // pool drained — fine, fewer people
             Vector2 o = Random.insideUnitCircle * crowdSpread;
-            Vector3 wp = stopPos + right * (o.x * 0.4f) + fwd * o.y;   // hug the footpath (thin in X)
+            Vector3 wp = footCenter + right * (o.x * 0.35f) + fwd * o.y;   // hug the footpath (thin across its width)
             wp.y = groundY;
             p.transform.SetParent(transform, true);     // ride the road
             p.transform.position = wp;
@@ -205,18 +241,19 @@ public class SplineStopSpawner : MonoBehaviour
             Stop st = _live[i];
             float dSqr = (busPos - st.stopPos).sqrMagnitude;
 
-            // Phase 1 — crowd up at the curb as the bus approaches.
+            // Phase 1 — crowd up at the curb as the bus approaches. Only the FIRST `autoBoardCount` of the crowd
+            // gather to board automatically; the rest stay Waiting (Conductor 1 shouts/grabs them manually).
             if (!st.gathered && dSqr <= gatherRange * gatherRange)
             {
                 st.gathered = true;
                 int g = 0;
-                for (int c = 0; c < st.crowd.Count; c++)
-                    if (st.crowd[c] != null && st.crowd[c].state == Passenger.State.Waiting && Random.value < boardFraction)
+                for (int c = 0; c < st.crowd.Count && g < autoBoardCount; c++)
+                    if (st.crowd[c] != null && st.crowd[c].state == Passenger.State.Waiting)
                         st.crowd[c].BeginGather(CurbPoint(st, g++));
             }
 
-            // Phase 2 — bus pulled up slow & close: the curb crowd boards, AND any rider who rang the bell
-            // (wants off) alights here and walks away on the footpath.
+            // Phase 2 — bus pulled up slow & close: the gathered (auto-board) crowd boards, AND any rider who rang
+            // the bell (wants off) alights here. The non-gathered waiters stay for the conductor to call/grab.
             if (st.gathered && !st.boardingDone && bus.CanBoard && dSqr <= boardRange * boardRange)
             {
                 st.boardingDone = true;
@@ -269,8 +306,8 @@ public class SplineStopSpawner : MonoBehaviour
     [Header("Walkers (L5)")]
     [Tooltip("A walking pedestrian joins a stop when within this distance (m) of it.")]
     public float joinRange = 7f;
-    [Tooltip("Cap on a stop's crowd (seed + joined walkers) so it doesn't balloon forever.")]
-    public int crowdCap = 28;
+    [Tooltip("Cap on a stop's crowd (seed + joined walkers) so it doesn't balloon forever. Keep 20–30.")]
+    public int crowdCap = 30;
 
     /// A footpath walker reached the kerb: if a live stop is within joinRange, add it to that stop's waiting
     /// crowd (re-parented to ride the road) and return true. The walker keeps the fare it was carrying.

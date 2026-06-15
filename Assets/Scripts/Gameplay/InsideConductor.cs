@@ -8,8 +8,9 @@ using UnityEngine.UI;
 public class InsideConductor : MonoBehaviour
 {
     public float moveSpeed = 3f;
-    [Tooltip("Max distance to outline + collect from a rider.")]
-    public float reachRange = 2.0f;
+    [Tooltip("Max distance to outline + collect from a rider. Generous so you can reach riders SEATED across the " +
+             "aisle from the walkway, not just ones right next to you.")]
+    public float reachRange = 3.4f;
     public float shoveRange = 1.8f;
     [Tooltip("Speed multiplier while squeezing past standing riders.")]
     public float crowdSlowFactor = 0.45f;
@@ -19,6 +20,28 @@ public class InsideConductor : MonoBehaviour
     bool _controlled;
     bool _ai;                          // SOLO: auto-walk + auto-collect when unmanned
     Vector3 _center, _half;
+
+    // sprite-clip state: collect-pose flashes briefly on a collect; otherwise front/back walk by aisle direction
+    enum C2Clip { None, WalkFront, WalkBack, Collect }
+    C2Clip _c2clip = C2Clip.None;
+    float _collectPoseUntil;
+    void UpdateC2Clip(float fwdInput)
+    {
+        if (_view == null) return;
+        if (Time.time < _collectPoseUntil)
+        {
+            if (_c2clip != C2Clip.Collect && CharacterSprites.C2Collect != null)
+            { _c2clip = C2Clip.Collect; _view.SetSprite(CharacterSprites.C2Collect); }
+            return;
+        }
+        // moving away from the camera (up the aisle) → back-view, else front-view
+        bool back = fwdInput > 0.2f && CharacterSprites.C2WalkBack != null;
+        var want = back ? C2Clip.WalkBack : C2Clip.WalkFront;
+        if (want == _c2clip) return;
+        _c2clip = want;
+        var frames = back ? CharacterSprites.C2WalkBack : CharacterSprites.C2WalkFront;
+        if (frames != null) _view.SetWalk(frames, 0.1f);
+    }
 
     Passenger _target;                 // the currently-outlined rider
     float _flashUntil;
@@ -83,6 +106,10 @@ public class InsideConductor : MonoBehaviour
         p.y = wc.y;
         transform.localPosition = p;
 
+        // sprite clip: collect-pose briefly after a collect, else back-view walking AWAY (up the aisle, +z),
+        // else front-view walk. (mv.y > 0 = moving away from the camera into the cabin.)
+        UpdateC2Clip(mv.y);
+
         // --- snappy selection: always outline the nearest collectable rider in reach ---
         UpdateTarget(bp);
 
@@ -99,9 +126,21 @@ public class InsideConductor : MonoBehaviour
         // --- (kept) shove a standing aisle rider into a seat to free aisle space ---
         if (GameInput.Instance.altAction.WasPressedThisFrame()) TryShove();
 
+        // show the UI while a rider is selected OR a collect flash is still fading
         if (_ui != null) _ui.SetActive(_target != null || Time.time < _flashUntil);
-        if (_text != null && _target != null && Time.time >= _flashUntil)
-            _text.text = "Tk " + _target.OwedFare + "   [E] collect";
+        // standing prompt: who's selected + what you'll collect (the rising +Tk popup is separate, on _text)
+        if (_promptText != null)
+        {
+            bool showPrompt = _target != null;
+            _promptText.gameObject.SetActive(showPrompt);
+            if (showPrompt)
+            {
+                bool ready = Time.time >= _collectReadyAt;
+                _promptText.text = ready ? (_target.OwedFare + " B   press [E] to collect")
+                                         : "…counting change";
+                _promptText.color = ready ? PixelUI.Text : PixelUI.InkDim;
+            }
+        }
     }
 
     // ---------- SOLO auto-inside-conductor: walk to collectable riders and collect their fares ----------
@@ -182,6 +221,7 @@ public class InsideConductor : MonoBehaviour
     void Collect(Passenger p)
     {
         _collectReadyAt = Time.time + collectCooldown;   // gate the next collect (anti-spam)
+        _collectPoseUntil = Time.time + 0.6f;            // show the "collecting fare" pose briefly
 
         var gn = BamePlastic.Net.GameNet.Instance;
         if (gn != null && gn.Active && !gn.IsDriver)
@@ -205,9 +245,9 @@ public class InsideConductor : MonoBehaviour
             int bonus = Mathf.RoundToInt(comboBaseBonus * _combo * (0.5f + 1.5f * mic));
             int total = amt + bonus;
 
-            if (ShiftManager.Instance != null) ShiftManager.Instance.AddEarnings(total);
-            Flash(bonus > 0 ? ("Tk " + amt + "  +" + bonus + "  COMBO x" + _combo + (mic > 0.55f ? " (LOUD!)" : ""))
-                            : ("Collected  Tk " + amt + " !"));
+            if (ShiftManager.Instance != null) { ShiftManager.Instance.AddEarnings(total); ShiftManager.Instance.ReportFareCollected(); }
+            Flash(bonus > 0 ? ("+" + amt + " B  +" + bonus + "  COMBO x" + _combo + (mic > 0.55f ? " (LOUD!)" : ""))
+                            : ("+" + amt + " B collected!"));
             if (gn != null && gn.Active && gn.IsDriver) gn.DriverFareCollected(p, total, (byte)gn.LocalRole);
         }
     }
@@ -251,42 +291,54 @@ public class InsideConductor : MonoBehaviour
         return false;
     }
 
+    // a rising "+Tk N" popup on each collect, plus a small prompt line. Both fade out.
+    Text _promptText;
+    RectTransform _flashRt;
+    Vector3 _flashBasePos;
+
     void Flash(string msg)
     {
-        if (_text != null) _text.text = msg;
-        _flashUntil = Time.time + 1.1f;
+        if (_text != null)
+        {
+            _text.text = msg;
+            _text.color = new Color(1f, 0.85f, 0.35f, 1f);
+            if (_flashRt != null) _flashRt.anchoredPosition = _flashBasePos;   // reset the rise
+        }
+        _flashUntil = Time.time + 1.3f;
     }
 
+    void LateUpdate()
+    {
+        // animate the fare popup: float UP + fade out over its lifetime.
+        if (_text == null || _flashRt == null) return;
+        float remain = _flashUntil - Time.time;
+        if (remain <= 0f) { _text.text = ""; return; }
+        float age = 1.3f - remain;
+        _flashRt.anchoredPosition = _flashBasePos + new Vector3(0f, age * 60f, 0f);
+        var col = _text.color; col.a = Mathf.Clamp01(remain / 0.5f); _text.color = col;
+    }
 
     void BuildUI()
     {
-        Font font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-        if (font == null) font = Font.CreateDynamicFontFromOSFont("Arial", 16);
+        // pixel-themed canvas so the collect feedback matches the rest of the HUD.
+        var canvas = PixelUI.Canvas(transform, "FareUI", 12);
+        Transform root = canvas.transform;
 
-        GameObject canvasGO = new GameObject("FareUI");
-        Canvas c = canvasGO.AddComponent<Canvas>();
-        c.renderMode = RenderMode.ScreenSpaceOverlay;
-        CanvasScaler sc = canvasGO.AddComponent<CanvasScaler>();
-        sc.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-        sc.referenceResolution = new Vector2(1920, 1080);
+        // the rising "+Tk N COMBO" popup, centre-ish, big + gold (outlined so it reads over the cabin).
+        _text = PixelUI.Label(root, "FareFlash", "", 46, TextAnchor.MiddleCenter, PixelUI.Gold, outline: true);
+        _flashRt = _text.rectTransform;
+        _flashRt.anchorMin = _flashRt.anchorMax = new Vector2(0.5f, 0.42f); _flashRt.pivot = new Vector2(0.5f, 0.5f);
+        _flashBasePos = Vector3.zero; _flashRt.anchoredPosition = _flashBasePos;
+        _flashRt.sizeDelta = new Vector2(900, 80);
+        _text.horizontalOverflow = HorizontalWrapMode.Overflow; _text.verticalOverflow = VerticalWrapMode.Overflow;
 
-        GameObject t = new GameObject("FareText");
-        t.transform.SetParent(canvasGO.transform, false);
-        _text = t.AddComponent<Text>();
-        _text.font = font;
-        _text.fontSize = 40;
-        _text.alignment = TextAnchor.MiddleCenter;
-        _text.color = new Color(1f, 0.85f, 0.35f);
-        _text.horizontalOverflow = HorizontalWrapMode.Overflow;
-        _text.verticalOverflow = VerticalWrapMode.Overflow;
-        RectTransform rt = _text.rectTransform;
-        rt.anchorMin = new Vector2(0.5f, 0.28f);
-        rt.anchorMax = new Vector2(0.5f, 0.28f);
-        rt.pivot = new Vector2(0.5f, 0.5f);
-        rt.anchoredPosition = Vector2.zero;
-        rt.sizeDelta = new Vector2(900, 80);
+        // a small standing prompt above it telling you what to do (shown while a rider is selected).
+        _promptText = PixelUI.Label(root, "FarePrompt", "", 22, TextAnchor.MiddleCenter, PixelUI.Text, outline: true);
+        var pr = _promptText.rectTransform;
+        pr.anchorMin = pr.anchorMax = new Vector2(0.5f, 0.36f); pr.pivot = new Vector2(0.5f, 0.5f);
+        pr.anchoredPosition = Vector3.zero; pr.sizeDelta = new Vector2(900, 40);
 
-        _ui = canvasGO;
+        _ui = canvas.gameObject;
         _ui.SetActive(false);
     }
 }

@@ -15,6 +15,13 @@ public static class PixelUIWidgets
                                      Vector2 size, Action onClick, Color? accent = null)
     {
         var img = MakePanel(parent, name, anchor, pos, size, PixelUI.PanelFill);
+        // a Selectable makes this focusable by the EventSystem so a GAMEPAD/KEYBOARD can navigate to it. Visuals
+        // are driven by PixelButton's own handlers (incl. ISelect/ISubmit), so the Selectable does no colour
+        // transition itself (Transition.None) — it only provides focus + Automatic directional navigation.
+        var sel = img.gameObject.AddComponent<Selectable>();
+        sel.transition = Selectable.Transition.None;
+        sel.targetGraphic = img;
+        var nav = sel.navigation; nav.mode = Navigation.Mode.Automatic; sel.navigation = nav;
         var btn = img.gameObject.AddComponent<PixelButton>();
         btn.Init(img, accent ?? PixelUI.Gold, onClick);
 

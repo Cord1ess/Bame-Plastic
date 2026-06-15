@@ -20,9 +20,38 @@ public class ShiftHud : MonoBehaviour
     GameObject _summaryPanel;
     Text _summaryText;
 
+    Text _toastText;            // transient centre-screen alert (fare lost, police fine)
+    float _toastUntil;
+
     readonly StringBuilder _sb = new StringBuilder(256);
 
     void Start() { BuildUI(); }
+
+    void OnEnable()
+    {
+        ShiftManager.FareLost += OnFareLost;
+        PoliceHazard.Fined += OnFined;
+        PlayerAccount.AchievementUnlocked += OnAchievement;
+    }
+    void OnDisable()
+    {
+        ShiftManager.FareLost -= OnFareLost;
+        PoliceHazard.Fined -= OnFined;
+        PlayerAccount.AchievementUnlocked -= OnAchievement;
+    }
+
+    void OnFareLost(int amount) => Toast("<color=#E06A5A>FARE LOST  −" + amount + " B</color>", 1.6f);
+    void OnFined(int amount)    => Toast("<color=#FF4D4D>POLICE FINE  −" + amount.ToString("N0") + " B</color>", 2.4f);
+    void OnAchievement(string name, int bhara) => Toast("<color=#FFC44D>★ ACHIEVEMENT  " + name + "  +" + bhara + " Bhara</color>", 3.5f);
+
+    /// Show a brief centre-screen alert (richtext allowed). Newer toasts replace older ones.
+    void Toast(string msg, float seconds)
+    {
+        if (_toastText == null) return;
+        _toastText.text = msg;
+        _toastText.gameObject.SetActive(true);
+        _toastUntil = Time.unscaledTime + seconds;
+    }
 
     int _lastEarnings = int.MinValue, _lastTimer = int.MinValue, _lastHealth = int.MinValue;
     float _standingsTimer;
@@ -33,7 +62,7 @@ public class ShiftHud : MonoBehaviour
         if (sm == null) return;
 
         // rebuild each text only when its DISPLAYED value changes (no per-frame string alloc → no WebGL GC churn)
-        if (sm.Earnings != _lastEarnings) { _takaText.text = "Tk " + sm.Earnings.ToString("N0"); _lastEarnings = sm.Earnings; }
+        if (sm.Earnings != _lastEarnings) { _takaText.text = sm.Earnings.ToString("N0") + " B"; _lastEarnings = sm.Earnings; }
 
         int t = Mathf.CeilToInt(sm.TimeRemaining);
         if (t != _lastTimer)
@@ -50,8 +79,13 @@ public class ShiftHud : MonoBehaviour
         if (hp != _lastHealth) { _healthText.text = "BUS " + hp + "%"; _lastHealth = hp; }
 
         // standings: a sort + string build — throttle to ~4Hz (it barely changes within a frame)
+        // rebuild standings ~4Hz; the "rival leads" warning is now WOVEN INTO the board (the leading rival's row
+        // blinks + carries a tag) rather than a separate line below it.
         _standingsTimer -= Time.deltaTime;
-        if (_standingsTimer <= 0f) { _standingsText.text = BuildStandings(sm); _standingsTimer = 0.25f; }
+        if (_standingsTimer <= 0f) { _standingsText.text = BuildStandings(sm); _standingsTimer = 0.06f; }
+
+        if (_toastText != null && _toastText.gameObject.activeSelf && Time.unscaledTime >= _toastUntil)
+            _toastText.gameObject.SetActive(false);
 
         if (sm.IsOver && !_summaryPanel.activeSelf) ShowSummary(sm);
     }
@@ -60,13 +94,34 @@ public class ShiftHud : MonoBehaviour
     {
         _sb.Length = 0;
         var standings = sm.GetStandings();
+        bool rivalAhead = sm.RivalAhead && sm.IsRunning;
+        // blink phase (0..1) for the warning highlight on the leading rival's row
+        bool blink = Mathf.Sin(Time.unscaledTime * 6f) > 0f;
+
         for (int i = 0; i < standings.Count; i++)
         {
             var s = standings[i];
-            string row = (i + 1) + ". " + s.name + "  Tk " + s.taka.ToString("N0");
-            // player's row in warm gold + marker; rivals in cream (both read on the scene via the text halo)
-            if (s.isPlayer) _sb.Append("<color=#FFC44D>").Append(row).Append(" ◀</color>");
-            else _sb.Append("<color=#F2E9D2>").Append(row).Append("</color>");
+            // a rival who is currently OUT-EARNING the player (and is the leader) gets the warning treatment.
+            bool isLeadingRival = !s.isPlayer && rivalAhead && s.name == sm.LeaderName;
+            string row = (i + 1) + ". " + s.name + "  " + s.taka.ToString("N0") + " B";
+
+            if (s.isPlayer)
+            {
+                // player gold; if being out-earned, append a small warning marker on the player's own row
+                _sb.Append("<color=#FFC44D>").Append(row).Append(" ◀");
+                if (rivalAhead) _sb.Append("  <color=#FF5555>BEAT ").Append(sm.LeaderName).Append("!</color>");
+                _sb.Append("</color>");
+            }
+            else if (isLeadingRival)
+            {
+                // the threatening leader: blink red↔bright + a ▲ tag so the warning lives IN the board
+                string hex = blink ? "#FF4D4D" : "#FFB0B0";
+                _sb.Append("<color=").Append(hex).Append('>').Append("▲ ").Append(row).Append("  LEADING</color>");
+            }
+            else
+            {
+                _sb.Append("<color=#F2E9D2>").Append(row).Append("</color>");
+            }
             _sb.AppendLine();
         }
         return _sb.ToString();
@@ -84,7 +139,7 @@ public class ShiftHud : MonoBehaviour
         _sb.Append(won ? "<color=#FFC44D>SHIFT WON</color>" : "<color=#F2E9D2>SHIFT OVER</color>").AppendLine();
         _sb.AppendLine();
         _sb.Append("You placed <color=#FFC44D>").Append(place).Append("</color> of ").Append(count).AppendLine();
-        _sb.Append("Earnings  <color=#FFC44D>Tk ").Append(sm.Earnings.ToString("N0")).Append("</color>").AppendLine();
+        _sb.Append("Earnings  <color=#FFC44D>").Append(sm.Earnings.ToString("N0")).Append(" B</color>").AppendLine();
         // account reward (Bhara is granted at shift end via PlayerAccount.AwardEarnings; 100 tk = 10 Bhara)
         if (PlayerAccount.LoggedIn)
         {
@@ -117,21 +172,28 @@ public class ShiftHud : MonoBehaviour
         var boardTitle = PixelUI.Label(root, "BoardTitle", "STANDINGS", 24, TextAnchor.UpperRight, PixelUI.InkDim, outline: true);
         AnchorCorner(boardTitle.rectTransform, new Vector2(1, 1), new Vector2(-30, -20), new Vector2(440, 30));
         _standingsText = PixelUI.Label(root, "Standings", "", 26, TextAnchor.UpperRight, PixelUI.Ink, outline: true);
-        AnchorCorner(_standingsText.rectTransform, new Vector2(1, 1), new Vector2(-30, -56), new Vector2(440, 320));
+        AnchorCorner(_standingsText.rectTransform, new Vector2(1, 1), new Vector2(-30, -56), new Vector2(560, 320));
 
         // BOTTOM-LEFT: money + health, in white panels (balances the bottom-right speedometer).
         BuildMoneyHealth(root);
+
+        // CENTRE alert toast (fare lost / police fine) — hidden until something fires it.
+        _toastText = PixelUI.Label(root, "Toast", "", 40, TextAnchor.MiddleCenter, PixelUI.Text, outline: true);
+        var tr = _toastText.rectTransform;
+        tr.anchorMin = tr.anchorMax = new Vector2(0.5f, 0.5f); tr.pivot = new Vector2(0.5f, 0.5f);
+        tr.anchoredPosition = new Vector2(0, 160); tr.sizeDelta = new Vector2(900, 70);
+        _toastText.gameObject.SetActive(false);
 
         BuildSummaryPanel(root);
     }
 
     void BuildMoneyHealth(Transform root)
     {
-        // TAKA panel
+        // BHARA (earnings) panel
         var takaPanel = PixelUI.Panel(root, "TakaPanel", new Vector2(0, 0), new Vector2(32, 122), new Vector2(300, 84));
-        PixelUI.Label(takaPanel.transform, "TakaLabel", "TAKA", 18, TextAnchor.UpperLeft, PixelUI.InkDim)
+        PixelUI.Label(takaPanel.transform, "TakaLabel", "BHARA", 18, TextAnchor.UpperLeft, PixelUI.InkDim)
                .rectTransform.anchoredPosition = new Vector2(16, -10);
-        _takaText = PixelUI.Label(takaPanel.transform, "Taka", "Tk 0", 40, TextAnchor.LowerLeft, PixelUI.Gold);
+        _takaText = PixelUI.Label(takaPanel.transform, "Taka", "0 B", 40, TextAnchor.LowerLeft, PixelUI.Gold);
         var trt = _takaText.rectTransform;
         trt.anchorMin = trt.anchorMax = new Vector2(0, 0); trt.pivot = new Vector2(0, 0);
         trt.anchoredPosition = new Vector2(16, 12); trt.sizeDelta = new Vector2(270, 50);

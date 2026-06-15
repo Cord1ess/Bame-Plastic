@@ -26,9 +26,14 @@ public class PassengerPool : MonoBehaviour
     Passenger CreateOne(int i)
     {
         BillboardCharacter v = BillboardCharacter.Create("Passenger_" + i, Color.grey, passengerHeight, Vector3.zero, transform);
+        // real art: each pooled passenger gets a deterministic sheet character — a 9-frame FRONT walk cycle (on
+        // foot) + a matching BACK sprite (when seated on the bus, facing away). Falls back to placeholder if none.
+        var walk = CharacterSprites.Pedestrian(i);
+        var back = CharacterSprites.PedestrianBack(i);
+        if (walk != null) v.SetWalk(walk, 0.1f);
         Passenger p = v.gameObject.AddComponent<Passenger>();
         p.PoolIndex = i;                 // stable id — same passenger N on every client (deterministic pool)
-        p.Setup(v);
+        p.Setup(v, walk, back);
         p.Hide();
         return p;
     }

@@ -34,8 +34,11 @@ public class ShiftManager : MonoBehaviour
     [Range(0f, 1f)] public float startTimeOfDay = 0.24f;  // morning
     [Range(0f, 1f)] public float endTimeOfDay = 0.86f;    // night
 
-    [Header("Placeholder income (TEMP — replaced by passenger fares in step 2)")]
-    public bool enablePlaceholderIncome = true;
+    [Header("Placeholder income (TEMP — superseded by collect-or-lose-it passenger fares)")]
+    [Tooltip("OFF for real play: passive taka masks the collect-or-lose-it fare loop (a fare is income ONLY if a " +
+             "conductor collects it before the rider leaves). Turn ON only to keep the loop playable while testing " +
+             "without conductors.")]
+    public bool enablePlaceholderIncome = false;
     [Tooltip("Slow passive taka while the shift runs, so the loop is playable before passengers exist.")]
     public float passiveTakaPerSecond = 7f;
     [Tooltip("Press to simulate collecting a fare.")]
@@ -91,10 +94,13 @@ public class ShiftManager : MonoBehaviour
         Health = maxHealth;
         Earnings = 0;
         _earningsFloat = 0f;
+        FaresCollected = 0;
         IsRunning = true;
         IsOver = false;
 
-        if (rivals == null || rivals.Count == 0) GenerateDefaultRivals();
+        // ALWAYS rebuild the canonical 5 standings at the start of every shift, so a stale serialized list (or a
+        // RivalBrain that linked an old-named entry last run) can never leave wrong names on the board.
+        GenerateDefaultRivals();
         foreach (var r in rivals) r.ResetEarnings();
         if (dayNight != null) { dayNight.externalTimeControl = true; dayNight.SetShiftProgress(0f); }
 
@@ -130,8 +136,9 @@ public class ShiftManager : MonoBehaviour
             dayNight.SetShiftProgress(progress);
         }
 
-        // Rivals tick
-        for (int i = 0; i < rivals.Count; i++) rivals[i].Tick(dt);
+        // Rivals tick — adaptive rubber-band against the PLAYER's current earnings (they chase + pressure you).
+        for (int i = 0; i < rivals.Count; i++) rivals[i].Tick(dt, Earnings);
+        UpdateRivalWarning();
 
         // Placeholder income / debug (removed once real passengers feed AddEarnings)
         if (enablePlaceholderIncome)
@@ -148,12 +155,23 @@ public class ShiftManager : MonoBehaviour
         }
     }
 
+    /// Fired when a passenger leaves WITHOUT their fare collected — the lost amount. HUD subscribes for a ping.
+    public static System.Action<int> FareLost;
+    /// Called by Passenger when an unpaid rider alights (driver/solo only). Routes the lost-fare signal to the HUD.
+    public static void ReportFareLost(int amount) { if (amount > 0) FareLost?.Invoke(amount); }
+
+    /// Number of fares collected this shift (career-tracked at shift end for achievements).
+    public int FaresCollected { get; private set; }
+    /// Called when a conductor successfully collects a fare (driver/solo authoritative).
+    public void ReportFareCollected() { FaresCollected++; }
+
     // ---- Public API (the surface the backend will mirror) ----
+    /// Add (or, with a negative amount, deduct — e.g. a police fine) taka. Earnings may go NEGATIVE (a bad shift
+    /// can leave you in the red); only the displayed int is clamped to a sane range, not floored at zero.
     public void AddEarnings(int taka)
     {
         if (taka == 0) return;
         _earningsFloat += taka;
-        if (_earningsFloat < 0f) _earningsFloat = 0f;
         Earnings = Mathf.RoundToInt(_earningsFloat);
     }
 
@@ -175,6 +193,25 @@ public class ShiftManager : MonoBehaviour
         ReportResult();
     }
 
+    /// LEAVE SHIFT → back to the living menu IN PLACE (no scene reload). Reset the run to idle and tear down the
+    /// gameplay-only HUDs so MenuMode can rebuild the menu cleanly at the current spot. Does NOT report/award
+    /// (you abandoned the shift). Day/night holds at the menu's sunrise again.
+    public void EndToMenu()
+    {
+        IsRunning = false;
+        IsOver = false;
+        _reported = false;
+        TimeRemaining = shiftDuration;
+        Earnings = 0; _earningsFloat = 0f;
+        Health = maxHealth;
+        FaresCollected = 0;
+        if (dayNight != null) { dayNight.externalTimeControl = true; dayNight.SetShiftProgress(0f); }
+
+        // tear down the gameplay HUDs (rebuilt next BeginShift). Find by type so we don't hold stale refs.
+        var hud = FindAnyObjectByType<ShiftHud>(); if (hud != null) Destroy(hud.gameObject);
+        var speedo = FindAnyObjectByType<SpeedometerHud>(); if (speedo != null) Destroy(speedo.gameObject);
+    }
+
     bool _reported;
     /// At shift end: award the run's earnings to the logged-in account (career taka + Bhara) and post the result
     /// to the leaderboard. In MULTIPLAYER only the DRIVER reports the shared bus earnings (avoids triple-count);
@@ -187,9 +224,10 @@ public class ShiftManager : MonoBehaviour
         var gn = BamePlastic.Net.GameNet.Instance;
         bool mpNonDriver = gn != null && gn.Active && !gn.IsDriver;
 
-        // every human credits their own wallet with the run's earnings (Bhara conversion happens server-side)
+        // every human credits their own wallet with the run's earnings (Bhara conversion happens server-side).
+        // Also report career stats (fares collected, finished #1) so the server can unlock achievements.
         if (PlayerAccount.LoggedIn && Earnings > 0)
-            PlayerAccount.AwardEarnings(Earnings);
+            PlayerAccount.AwardEarnings(Earnings, FaresCollected, PlayerRank() == 1);
 
         // leaderboard post — driver (or solo) only, so a co-op shift logs one shared result
         if (!mpNonDriver) PostLeaderboard();
@@ -238,12 +276,35 @@ public class ShiftManager : MonoBehaviour
 
     void GenerateDefaultRivals()
     {
+        // 5 named company buses with different aggression so the pack SPREADS around the player: a couple tend to
+        // lead (aggression > 1, the ones to beat), a couple trail, one sits near parity. The adaptive Tick makes
+        // each surge/ease relative to YOUR earnings, so the board stays a live race all shift.
         rivals = new List<RivalBus>
         {
-            new RivalBus { name = "Raida",       fareInterval = 3.5f },
-            new RivalBus { name = "Boishakhi",   fareInterval = 4.0f },
-            new RivalBus { name = "Projapoti",   fareInterval = 5.0f },
-            new RivalBus { name = "Mirpur Link", fareInterval = 3.2f },
+            new RivalBus { name = "Balaka",         aggression = 1.18f, baseEarnPerSec = 7f },
+            new RivalBus { name = "Victor Classic", aggression = 1.05f, baseEarnPerSec = 6.5f },
+            new RivalBus { name = "Raida",          aggression = 0.95f, baseEarnPerSec = 6f },
+            new RivalBus { name = "Mirpur Link",    aggression = 0.85f, baseEarnPerSec = 5.5f },
+            new RivalBus { name = "Osim",           aggression = 0.72f, baseEarnPerSec = 5f },
         };
+    }
+
+    // ---- "a rival is ahead" warning (HUD reads RivalAhead / TopRivalName) ----
+    /// True when the leading rival is earning more than the player — the HUD flashes a warning.
+    public bool RivalAhead { get; private set; }
+    /// The name + taka of the current leader (for the warning text).
+    public string LeaderName { get; private set; }
+    public int LeaderTaka { get; private set; }
+
+    void UpdateRivalWarning()
+    {
+        int bestTaka = Earnings; string bestName = playerName; bool playerLeads = true;
+        for (int i = 0; i < rivals.Count; i++)
+        {
+            if (rivals[i].Taka > bestTaka) { bestTaka = rivals[i].Taka; bestName = rivals[i].name; playerLeads = false; }
+        }
+        RivalAhead = !playerLeads;
+        LeaderName = bestName;
+        LeaderTaka = bestTaka;
     }
 }

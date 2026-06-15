@@ -21,6 +21,7 @@ public static class CreateTiledRoad
         go.AddComponent<FootpathPedestrians>(); // L5: pedestrians walking the footpath that join stops as fares
         go.AddComponent<TrafficSystem>();       // Phase C / L1: deterministic kinematic traffic both ways
         go.AddComponent<RivalManager>();        // L4: deploys rival buses (TrafficVehicle + RivalBrain) that camp stops
+        go.AddComponent<PoliceHazard>();        // hazard: periodic police checkpoints — slow to 45km/h or be fined
         var buildings = go.AddComponent<BuildingSpawner>();   // streets: streamed Akihabara block wall both sides
         SeedBlocks(buildings, freshlyAdded: true);
         go.AddComponent<RoadBarrier>();         // invisible wall past the footpath so the bus can't drive off
@@ -33,7 +34,7 @@ public static class CreateTiledRoad
         streamer.RebuildEditorPreview();         // build tiles + seat the bus on the left lane, in the Scene view
 
 #if UNITY_2022_2_OR_NEWER
-        if (Object.FindFirstObjectByType<FloatingOrigin>() == null)
+        if (Object.FindAnyObjectByType<FloatingOrigin>() == null)
 #else
         if (Object.FindObjectOfType<FloatingOrigin>() == null)
 #endif
@@ -62,6 +63,7 @@ public static class CreateTiledRoad
         if (fresh) spawner = Undo.AddComponent<BuildingSpawner>(road.gameObject);
         SeedBlocks(spawner, fresh);
         if (road.GetComponent<RoadBarrier>() == null) Undo.AddComponent<RoadBarrier>(road.gameObject);
+        if (road.GetComponent<PoliceHazard>() == null) Undo.AddComponent<PoliceHazard>(road.gameObject);
         Selection.activeGameObject = road.gameObject;
     }
 

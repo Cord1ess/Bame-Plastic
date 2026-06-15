@@ -178,12 +178,17 @@ public class SettingsScreen
         PixelUIWidgets.Toggle(p, "Mic", "", CtrlAnchor, CtrlPos(3), new Vector2(42, 42), SettingsStore.MicEnabled,
                               v => SettingsStore.MicEnabled = v);
 
-        var hint = PixelUI.Label(p, "GpHint", "Conductor mic: SHOUT to call passengers (C1) or boost fares (C2). " +
-                                 "Guide line is the eagle-vision optimal path. Shake/guide apply instantly.",
+        RowLabel(p, 4, "AUTO CONDUCTORS (SOLO)");
+        PixelUIWidgets.Toggle(p, "AutoCond", "", CtrlAnchor, CtrlPos(4), new Vector2(42, 42), SettingsStore.AutoConductors,
+                              v => SettingsStore.AutoConductors = v);
+
+        var hint = PixelUI.Label(p, "GpHint", "Auto Conductors (solo): ON = the 2 crew you aren't driving work " +
+                                 "automatically; OFF = you control all 3, switch with C. Mic: SHOUT to call " +
+                                 "passengers (C1) / boost fares (C2).",
                                  16, TextAnchor.UpperLeft, PixelUI.InkDim);
         var hr = hint.rectTransform;
         hr.anchorMin = new Vector2(0, 1); hr.anchorMax = new Vector2(0, 1); hr.pivot = new Vector2(0, 1);
-        hr.anchoredPosition = new Vector2(0, -4 * RowH - 4f); hr.sizeDelta = new Vector2(_pageW, 80);
+        hr.anchoredPosition = new Vector2(0, -5 * RowH - 4f); hr.sizeDelta = new Vector2(_pageW, 90);
         var ht = hint.GetComponent<Text>(); if (ht != null) ht.horizontalOverflow = HorizontalWrapMode.Wrap;
     }
 
@@ -205,26 +210,77 @@ public class SettingsScreen
         var ht = hint.GetComponent<Text>(); if (ht != null) ht.horizontalOverflow = HorizontalWrapMode.Wrap;  // wrap, don't overflow
     }
 
+    // each control row shows: NAME | [keyboard binding button] | [gamepad binding button]. Clicking a button
+    // starts an interactive rebind; the button shows "press…" until a key/button is captured (or Esc cancels).
+    const float CRowH = 50f;
+    PixelButton[] _bindBtns;
+    GameInput.Bindable[] _bindables;
+
     void BuildControls(Transform p)
     {
-        string[,] binds =
+        // GameInput is play-only (auto-created). The menu runs in play mode, so it exists; guard for the editor.
+        var gi = Application.isPlaying ? GameInput.Instance : null;
+        if (gi == null)
         {
-            { "STEER", "A / D" },
-            { "ACCELERATE", "W" },
-            { "BRAKE / REVERSE", "S" },
-            { "DRIFT (lean + boost)", "SPACE" },
-            { "RESTART SHIFT", "R" },
-        };
-        for (int i = 0; i < binds.GetLength(0); i++)
-        {
-            RowLabel(p, i, binds[i, 0]);
-            var v = PixelUI.Label(p, "V" + i, binds[i, 1], 22, TextAnchor.MiddleRight, PixelUI.Gold);
-            var vr = v.rectTransform;
-            vr.anchorMin = new Vector2(0, 1); vr.anchorMax = new Vector2(0, 1); vr.pivot = new Vector2(0, 1);
-            vr.anchoredPosition = new Vector2(LabelW + ColGap, -(i * RowH)); vr.sizeDelta = new Vector2(CtrlW, RowH - 12f);
+            PixelUI.Label(p, "RebindNote", "Controls appear in play mode.", 18, TextAnchor.UpperLeft, PixelUI.InkDim);
+            return;
         }
-        PixelUI.Label(p, "RebindNote", "rebinding coming soon", 16, TextAnchor.UpperLeft, PixelUI.InkDim)
-               .rectTransform.anchoredPosition = new Vector2(0, -(binds.GetLength(0) * RowH) - 4f);
+
+        _bindables = gi.Rebindables();
+        _bindBtns = new PixelButton[_bindables.Length];
+
+        // column header
+        var hKey = PixelUI.Label(p, "HKey", "KEYBOARD", 16, TextAnchor.MiddleCenter, PixelUI.InkDim);
+        Place(hKey.rectTransform, LabelW + ColGap, 0, BindColW, 22);
+        var hPad = PixelUI.Label(p, "HPad", "GAMEPAD", 16, TextAnchor.MiddleCenter, PixelUI.InkDim);
+        Place(hPad.rectTransform, LabelW + ColGap + BindColW + 8f, 0, BindColW, 22);
+
+        // the bindables come in (Key, Pad) PAIRS per action — render one row per action.
+        int row = 0;
+        for (int i = 0; i < _bindables.Length; i += 2)
+        {
+            float y = -(26f + row * CRowH);
+            string name = _bindables[i].label.Replace(" (Key)", "");
+            var lbl = PixelUI.Label(p, "CL_" + row, name, 18, TextAnchor.MiddleLeft, PixelUI.Ink);
+            Place(lbl.rectTransform, 0, y, LabelW, CRowH - 10f);
+            MakeBindButton(p, i,     LabelW + ColGap,                y, row);                 // keyboard
+            if (i + 1 < _bindables.Length)
+                MakeBindButton(p, i + 1, LabelW + ColGap + BindColW + 8f, y, row);            // gamepad
+            row++;
+        }
+
+        // reset-to-defaults at the bottom
+        PixelUIWidgets.Button(p, "ResetBinds", "RESET DEFAULTS", new Vector2(0, 1), new Vector2(0, -(26f + row * CRowH + 6f)),
+                              new Vector2(220, 44), () => { GameInput.Instance.ResetBindings(); RefreshBindLabels(); }, PixelUI.InkDim);
+    }
+
+    const float BindColW = 150f;
+
+    void MakeBindButton(Transform p, int idx, float x, float y, int row)
+    {
+        var b = _bindables[idx];
+        var btn = PixelUIWidgets.Button(p, "Bind_" + idx, GameInput.DisplayFor(b), new Vector2(0, 1),
+                                        new Vector2(x, y), new Vector2(BindColW, CRowH - 10f), null, PixelUI.Gold);
+        btn.SetOnClick(() =>
+        {
+            btn.SetLabelText("press…");
+            GameInput.Instance.StartRebind(b, ok => RefreshBindLabels());
+        });
+        _bindBtns[idx] = btn;
+    }
+
+    void RefreshBindLabels()
+    {
+        if (_bindBtns == null || _bindables == null) return;
+        for (int i = 0; i < _bindBtns.Length; i++)
+            if (_bindBtns[i] != null) _bindBtns[i].SetLabelText(GameInput.DisplayFor(_bindables[i]));
+    }
+
+    // place a rect anchored top-left of the page at (x, y) with a size
+    void Place(RectTransform rt, float x, float y, float w, float h)
+    {
+        rt.anchorMin = new Vector2(0, 1); rt.anchorMax = new Vector2(0, 1); rt.pivot = new Vector2(0, 1);
+        rt.anchoredPosition = new Vector2(x, y); rt.sizeDelta = new Vector2(w, h);
     }
 
     static Vector2Int[] Resolutions()

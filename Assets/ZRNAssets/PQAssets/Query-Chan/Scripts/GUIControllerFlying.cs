@@ -159,7 +159,7 @@ public class GUIControllerFlying : MonoBehaviour {
 		
 		if (GUI.Button (new Rect (Screen.width -100,700,100,100), "to Attack Mode"))
 		{
-			Application.LoadLevel("03_OperateQuery_Attack");
+			UnityEngine.SceneManagement.SceneManager.LoadScene("03_OperateQuery_Attack");
 		}
 
 	}

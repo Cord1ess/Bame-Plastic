@@ -23,6 +23,22 @@ public class Conductor : MonoBehaviour
     Passenger _held;
     Billboard _heldBillboard;   // we disable the carried one's billboard so we can hold it HORIZONTAL overhead
 
+    // sprite-clip state: swap walk/run/grab sets only when the state CHANGES (SetWalk resets the frame index)
+    enum Clip { None, Walk, Run, Grab }
+    Clip _clip = Clip.None;
+    void UpdateClipState(Clip want)
+    {
+        if (want == _clip || _view == null) return;
+        _clip = want;
+        Sprite[] frames = want switch
+        {
+            Clip.Run  => CharacterSprites.C1Run,
+            Clip.Grab => CharacterSprites.C1Grab,
+            _         => CharacterSprites.C1Walk,
+        };
+        if (frames != null) _view.SetWalk(frames, want == Clip.Run ? 0.06f : 0.09f);
+    }
+
     public void Setup(BillboardCharacter view, Transform home)
     {
         _view = view;
@@ -110,6 +126,9 @@ public class Conductor : MonoBehaviour
 
         CarryHeld(fwd);
 
+        // pick the sprite set: GRAB while carrying, RUN when moving (he always moves at run pace on foot), else WALK
+        UpdateClipState(_held != null ? Clip.Grab : (moveDir.sqrMagnitude > 0.01f ? Clip.Run : Clip.Walk));
+
         if (gi.action.WasPressedThisFrame()) { if (_held == null) TryGrab(); else ThrowHeld(); }
         if (gi.altAction.WasPressedThisFrame()) ThrowHeld();
 
@@ -185,6 +204,9 @@ public class Conductor : MonoBehaviour
     {
         var bus = BusController.Instance;
         if (bus == null) return;
+
+        // animate the AI conductor too: grab while carrying, run while off-bus chasing, walk otherwise
+        UpdateClipState(_held != null ? Clip.Grab : (!OnBus && _aiTarget != null ? Clip.Run : Clip.Walk));
 
         // carrying someone → THROW immediately from where he stands (the passenger arcs to the door + boards).
         // No walking to the door.

@@ -59,9 +59,11 @@ public class RivalBrain : MonoBehaviour, TrafficVehicle.IVehicleBrain
     {
         var sm = ShiftManager.Instance;
         if (sm == null) return;
+        // LINK ONLY to an existing standings entry (the canonical 5 from ShiftManager) — never ADD a new-named
+        // row, or a renamed/old physical rival would pollute the board. If there's no match, this physical bus is
+        // just road presence (no standings link); its AddEarnings calls below are then harmless no-ops.
         _standing = sm.rivals.Find(r => r.name == rivalName);
-        if (_standing == null) { _standing = new RivalBus { name = rivalName, fareInterval = 4f }; sm.rivals.Add(_standing); }
-        _standing.drivenByAgent = true;
+        // adaptive sim drives the standings; a linked physical bus adds a real-fare BONUS on top via AddEarnings.
     }
 
     // Called by TrafficVehicle.Tick AFTER its own avoidance — we rewrite intent on top.
